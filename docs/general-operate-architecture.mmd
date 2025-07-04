@@ -1,0 +1,95 @@
+graph TB
+    subgraph "Client Layer"
+        APP[Application Code]
+        API[API Endpoints]
+    end
+    
+    subgraph "Business Layer"
+        GO[GeneralOperate]
+        BO[Business Operations]
+    end
+    
+    subgraph "Data Access Layer"
+        subgraph "Database Operations"
+            CREATE[Create Operations]
+            READ[Read Operations]  
+            UPDATE[Update Operations]
+            DELETE[Delete Operations]
+        end
+        
+        subgraph "Cache Management"
+            WARM[Cache Warming]
+            CLEAR[Cache Clear]
+            ASIDE[Cache-Aside Pattern]
+        end
+    end
+    
+    subgraph "Storage Layer"
+        subgraph "Primary Database"
+            PG[(PostgreSQL)]
+            MY[(MySQL)]
+        end
+        
+        subgraph "Cache & Time Series"
+            REDIS[(Redis Cache)]
+            INFLUX[(InfluxDB)]
+        end
+    end
+    
+    subgraph "Infrastructure"
+        POOL[Connection Pool]
+        SESS[Session Management]
+        TRANS[Transaction Control]
+    end
+    
+    %% Client to Business connections
+    APP --> GO
+    API --> BO
+    
+    %% Business to Data Access connections
+    GO --> CREATE
+    GO --> READ
+    GO --> UPDATE
+    GO --> DELETE
+    
+    BO --> WARM
+    BO --> CLEAR
+    
+    %% Cache flow connections
+    READ --> ASIDE
+    UPDATE --> CLEAR
+    DELETE --> CLEAR
+    
+    %% Data Access to Storage connections
+    CREATE --> POOL
+    READ --> POOL
+    UPDATE --> POOL
+    DELETE --> POOL
+    
+    ASIDE --> REDIS
+    WARM --> REDIS
+    CLEAR --> REDIS
+    
+    %% Infrastructure connections
+    POOL --> PG
+    POOL --> MY
+    SESS --> TRANS
+    TRANS --> PG
+    TRANS --> MY
+    
+    %% Optional connections
+    GO -.-> INFLUX
+    BO -.-> INFLUX
+    
+    %% Styling
+    classDef clientLayer fill:#e1f5fe
+    classDef businessLayer fill:#f3e5f5  
+    classDef dataLayer fill:#e8f5e8
+    classDef storageLayer fill:#fff3e0
+    classDef infraLayer fill:#fce4ec
+    
+    class APP,API clientLayer
+    class GO,BO businessLayer
+    class CREATE,READ,UPDATE,DELETE,WARM,CLEAR,ASIDE dataLayer
+    class PG,MY,REDIS,INFLUX storageLayer
+    class POOL,SESS,TRANS infraLayer

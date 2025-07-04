@@ -1,0 +1,60 @@
+sequenceDiagram
+    participant Client
+    participant GeneralOperate
+    participant Cache as Redis Cache
+    participant DB as Database
+    participant Session as DB Session
+
+    Note over Client,Session: Create Operation
+    Client->>GeneralOperate: create_data([data])
+    GeneralOperate->>Session: Begin Transaction
+    GeneralOperate->>DB: INSERT INTO table
+    DB-->>GeneralOperate: Return created records
+    GeneralOperate->>Session: Commit Transaction
+    GeneralOperate-->>Client: Return created objects
+
+    Note over Client,Session: Read Operation (Cache Hit)
+    Client->>GeneralOperate: read_data_by_id({1,2,3})
+    GeneralOperate->>Cache: MGET cache_keys
+    Cache-->>GeneralOperate: Return cached data
+    GeneralOperate-->>Client: Return cached objects
+
+    Note over Client,Session: Read Operation (Cache Miss)
+    Client->>GeneralOperate: read_data_by_id({4,5,6})
+    GeneralOperate->>Cache: MGET cache_keys
+    Cache-->>GeneralOperate: Cache miss (NULL)
+    GeneralOperate->>DB: SELECT * FROM table WHERE id IN (4,5,6)
+    DB-->>GeneralOperate: Return query results
+    GeneralOperate->>Cache: SET cache_keys with data
+    GeneralOperate-->>Client: Return database objects
+
+    Note over Client,Session: Update Operation (Double Delete)
+    Client->>GeneralOperate: update_data([{id:1, ...}])
+    GeneralOperate->>Cache: DEL cache_key_1 (First Delete)
+    GeneralOperate->>Session: Begin Transaction
+    GeneralOperate->>DB: UPDATE table SET ... WHERE id=1
+    DB-->>GeneralOperate: Return updated count
+    GeneralOperate->>Session: Commit Transaction
+    Note over GeneralOperate: Wait 500ms
+    GeneralOperate->>Cache: DEL cache_key_1 (Second Delete)
+    GeneralOperate-->>Client: Return update count
+
+    Note over Client,Session: Delete Operation
+    Client->>GeneralOperate: delete_data({1,2,3})
+    GeneralOperate->>Cache: DEL cache_keys
+    GeneralOperate->>Session: Begin Transaction
+    GeneralOperate->>DB: DELETE FROM table WHERE id IN (1,2,3)
+    DB-->>GeneralOperate: Return deleted count
+    GeneralOperate->>Session: Commit Transaction
+    GeneralOperate-->>Client: Return deleted IDs
+
+    Note over Client,Session: Cache Management
+    Client->>GeneralOperate: cache_warming({1,2,3})
+    GeneralOperate->>DB: SELECT * FROM table WHERE id IN (1,2,3)
+    DB-->>GeneralOperate: Return data
+    GeneralOperate->>Cache: SET cache_keys with data
+    GeneralOperate-->>Client: Return success
+
+    Client->>GeneralOperate: cache_clear({1,2,3})
+    GeneralOperate->>Cache: DEL cache_keys
+    GeneralOperate-->>Client: Return success

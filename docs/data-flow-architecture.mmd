@@ -1,0 +1,119 @@
+graph LR
+    subgraph "Input Layer"
+        REQ[API Request]
+        DATA[Input Data]
+        FILTERS[Query Filters]
+    end
+    
+    subgraph "Validation Layer"
+        VALIDATE[Data Validation]
+        SANITIZE[Input Sanitization]
+        AUTH[Authorization Check]
+    end
+    
+    subgraph "Business Logic Layer"
+        ROUTER[Operation Router]
+        CREATE_LOGIC[Create Logic]
+        READ_LOGIC[Read Logic]
+        UPDATE_LOGIC[Update Logic]
+        DELETE_LOGIC[Delete Logic]
+    end
+    
+    subgraph "Cache Layer"
+        CACHE_CHECK[Cache Lookup]
+        CACHE_HIT[Cache Hit]
+        CACHE_MISS[Cache Miss]
+        CACHE_UPDATE[Cache Update]
+        CACHE_INVALIDATE[Cache Invalidate]
+    end
+    
+    subgraph "Data Access Layer"
+        CONN_POOL[Connection Pool]
+        SESSION_MGR[Session Manager]
+        QUERY_BUILDER[Query Builder]
+        TRANSACTION[Transaction Manager]
+    end
+    
+    subgraph "Storage Layer"
+        PRIMARY_DB[(Primary Database)]
+        REPLICA_DB[(Read Replica)]
+        CACHE_DB[(Redis)]
+        METRICS_DB[(InfluxDB)]
+    end
+    
+    subgraph "Output Layer"
+        SERIALIZER[Data Serializer]
+        RESPONSE[API Response]
+        METRICS[Metrics & Logs]
+    end
+    
+    %% Input flow
+    REQ --> VALIDATE
+    DATA --> SANITIZE
+    FILTERS --> AUTH
+    
+    %% Validation flow
+    VALIDATE --> ROUTER
+    SANITIZE --> ROUTER
+    AUTH --> ROUTER
+    
+    %% Business Logic routing
+    ROUTER --> CREATE_LOGIC
+    ROUTER --> READ_LOGIC
+    ROUTER --> UPDATE_LOGIC
+    ROUTER --> DELETE_LOGIC
+    
+    %% Read path with cache
+    READ_LOGIC --> CACHE_CHECK
+    CACHE_CHECK --> CACHE_HIT
+    CACHE_CHECK --> CACHE_MISS
+    CACHE_HIT --> SERIALIZER
+    
+    %% Cache miss path
+    CACHE_MISS --> CONN_POOL
+    CONN_POOL --> REPLICA_DB
+    REPLICA_DB --> CACHE_UPDATE
+    CACHE_UPDATE --> CACHE_DB
+    CACHE_UPDATE --> SERIALIZER
+    
+    %% Write path
+    CREATE_LOGIC --> SESSION_MGR
+    UPDATE_LOGIC --> SESSION_MGR
+    DELETE_LOGIC --> SESSION_MGR
+    
+    SESSION_MGR --> TRANSACTION
+    TRANSACTION --> QUERY_BUILDER
+    QUERY_BUILDER --> PRIMARY_DB
+    
+    %% Cache invalidation on writes
+    UPDATE_LOGIC --> CACHE_INVALIDATE
+    DELETE_LOGIC --> CACHE_INVALIDATE
+    CACHE_INVALIDATE --> CACHE_DB
+    
+    %% Response path
+    PRIMARY_DB --> SERIALIZER
+    SERIALIZER --> RESPONSE
+    
+    %% Metrics collection
+    CREATE_LOGIC --> METRICS
+    READ_LOGIC --> METRICS
+    UPDATE_LOGIC --> METRICS
+    DELETE_LOGIC --> METRICS
+    METRICS --> METRICS_DB
+    
+    %% Styling
+    classDef inputStyle fill:#e1f5fe
+    classDef validationStyle fill:#f3e5f5
+    classDef businessStyle fill:#e8f5e8
+    classDef cacheStyle fill:#fff3e0
+    classDef dataStyle fill:#fce4ec
+    classDef storageStyle fill:#e0f2f1
+    classDef outputStyle fill:#fff8e1
+    
+    class REQ,DATA,FILTERS inputStyle
+    class VALIDATE,SANITIZE,AUTH validationStyle
+    class ROUTER,CREATE_LOGIC,READ_LOGIC,UPDATE_LOGIC,DELETE_LOGIC businessStyle
+    class CACHE_CHECK,CACHE_HIT,CACHE_MISS,CACHE_UPDATE,CACHE_INVALIDATE cacheStyle
+    class CONN_POOL,SESSION_MGR,QUERY_BUILDER,TRANSACTION dataStyle
+    class PRIMARY_DB,REPLICA_DB,CACHE_DB,METRICS_DB storageStyle
+    class SERIALIZER,RESPONSE,METRICS outputStyle

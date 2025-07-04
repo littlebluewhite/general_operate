@@ -1,0 +1,41 @@
+flowchart TD
+    START([Client Request]) --> CHECK{Check Redis Cache}
+    
+    CHECK -->|Cache Hit| RETURN[Return Cached Data]
+    CHECK -->|Cache Miss| QUERY[Query Database]
+    
+    QUERY --> FOUND{Data Found?}
+    FOUND -->|Yes| CACHE[Store in Cache]
+    FOUND -->|No| NULL_MARK[Cache NULL Marker]
+    
+    CACHE --> RETURN_DB[Return Database Data]
+    NULL_MARK --> RETURN_NULL[Return NULL]
+    
+    RETURN --> END([End])
+    RETURN_DB --> END
+    RETURN_NULL --> END
+    
+    %% Update Flow
+    UPDATE_START([Update Request]) --> CLEAR1[First Cache Delete]
+    CLEAR1 --> UPDATE_DB[Update Database]
+    UPDATE_DB --> DELAY[Wait 500ms]
+    DELAY --> CLEAR2[Second Cache Delete]
+    CLEAR2 --> UPDATE_END([Update Complete])
+    
+    %% Delete Flow  
+    DELETE_START([Delete Request]) --> DELETE_CACHE[Clear Cache]
+    DELETE_CACHE --> DELETE_DB[Delete from Database]
+    DELETE_DB --> DELETE_END([Delete Complete])
+    
+    %% Styling
+    classDef readFlow fill:#e3f2fd
+    classDef writeFlow fill:#fff3e0
+    classDef deleteFlow fill:#ffebee
+    classDef decision fill:#f3e5f5
+    classDef cache fill:#e8f5e8
+    
+    class START,CHECK,QUERY,FOUND,RETURN,RETURN_DB,RETURN_NULL,END readFlow
+    class UPDATE_START,CLEAR1,UPDATE_DB,DELAY,CLEAR2,UPDATE_END writeFlow
+    class DELETE_START,DELETE_CACHE,DELETE_DB,DELETE_END deleteFlow
+    class CHECK,FOUND decision
+    class CACHE,NULL_MARK,CLEAR1,CLEAR2,DELETE_CACHE cache

@@ -1,9 +1,17 @@
 import asyncio
 import functools
 import json
-from typing import Any
+import re
+from abc import ABC, abstractmethod
+from typing import Any, Generic, TypeVar
 
+import pymysql
 import redis
+import structlog
+from redis import RedisError
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm.exc import UnmappedInstanceError
 
 from . import GeneralOperateException
 from .app.cache_operate import CacheOperate
@@ -11,51 +19,156 @@ from .app.client.influxdb import InfluxDB
 from .app.influxdb_operate import InfluxOperate
 from .app.sql_operate import SQLOperate
 
+T = TypeVar('T')
 
-class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
+
+class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
+    """
+    Base class for all database operators
+    Provides unified interface for SQL, cache, and time-series data operations
+    """
+
     def __init__(
         self,
-        module,
         database_client,
         redis_client: redis.asyncio.Redis,
         influxdb: InfluxDB = None,
         exc=GeneralOperateException,
     ):
+        # Get module from subclass
+        module = self.get_module()
+
         self.module = module
         self.table_name = module.table_name
         self.main_schemas = module.main_schemas
         self.create_schemas = module.create_schemas
         self.update_schemas = module.update_schemas
         self.__exc = exc
+
+        # Initialize parent classes
         CacheOperate.__init__(self, redis_client, exc)
         SQLOperate.__init__(self, database_client, exc)
         InfluxOperate.__init__(self, influxdb)
 
+        # Set up logging
+        self.logger = structlog.get_logger().bind(
+            operator=self.__class__.__name__,
+            table=self.table_name
+        )
+
+    @abstractmethod
+    def get_module(self):
+        """
+        Subclasses must implement this to return their schema module
+        
+        Example:
+            from shared.schemas.notification import module as notification_module
+            return notification_module
+        """
+        pass
+
     @staticmethod
     def exception_handler(func):
         """Exception handler decorator for GeneralOperate methods"""
-
+        def handle_exceptions(self, e):
+            """Common exception handling logic"""
+            # redis error
+            if isinstance(e, redis.ConnectionError):
+                raise self.__exc(
+                    status_code=487,
+                    message=f"Redis connection error: {str(e)}",
+                    message_code=3001,
+                )
+            elif isinstance(e, redis.TimeoutError):
+                raise self.__exc(
+                    status_code=487,
+                    message=f"Redis timeout error: {str(e)}",
+                    message_code=3002,
+                )
+            elif isinstance(e, redis.ResponseError):
+                raise self.__exc(
+                    status_code=487,
+                    message=f"Redis response error: {str(e)}",
+                    message_code=3003,
+                )
+            elif isinstance(e, RedisError):
+                error_message = str(e)
+                pattern = r"Error (\d+)"
+                match = re.search(pattern, error_message)
+                if match:
+                    error_code = match.group(1)
+                    raise self.__exc(
+                        status_code=492,
+                        message=f"Redis error: {error_message}",
+                        message_code=int(error_code),
+                    )
+                else:
+                    raise self.__exc(
+                        status_code=487, message=error_message, message_code=3004
+                    )
+            # decode error
+            elif isinstance(e, json.JSONDecodeError):
+                raise self.__exc(
+                    status_code=491,
+                    message=f"JSON decode error: {str(e)}",
+                    message_code=3005,
+                )
+            elif isinstance(e, DBAPIError):
+                if isinstance(e.orig, AsyncAdapt_asyncpg_dbapi.Error):
+                    pg_error = e.orig
+                    message = str(pg_error).replace("\n", " ").replace("\r", " ").split(': ', 1)[1]
+                    code = getattr(pg_error, "sqlstate", "1") or "1"
+                    raise self.__exc(
+                        status_code=489, message=message, message_code=code
+                    )
+                elif isinstance(e.orig, pymysql.Error):
+                    code, msg = e.orig.args
+                    raise self.__exc(status_code=486, message=msg, message_code=code)
+                else:
+                    # Generic database error handling
+                    message = str(e).replace("\n", " ").replace("\r", " ")
+                    raise self.__exc(
+                        status_code=487, message=message, message_code="UNKNOWN"
+                    )
+            elif isinstance(e, UnmappedInstanceError):
+                raise self.__exc(
+                    status_code=486,
+                    message="id: one or more of ids is not exist",
+                    message_code=2,
+                )
+            elif isinstance(e, (ValueError, TypeError, AttributeError)) and "SQL" in str(e):
+                # Data validation or SQL-related errors
+                raise self.__exc(
+                    status_code=400,
+                    message=f"SQL operation validation error: {str(e)}",
+                    message_code=299
+                )
+            elif isinstance(e, GeneralOperateException):
+                # If it's already a GeneralOperateException, raise it directly
+                raise e
+            else:
+                # For truly unexpected exceptions
+                raise self.__exc(
+                    status_code=500,
+                    message=f"Operation error: {str(e)}",
+                    message_code=9999,
+                )
         @functools.wraps(func)
         async def async_wrapper(self, *args, **kwargs):
             try:
                 return await func(self, *args, **kwargs)
-            except GeneralOperateException as e:
-                # If it's already a GeneralOperateException, raise it directly
-                raise e
             except Exception as e:
-                # For other exceptions, raise self.__exc instance
-                raise self.__exc(status_code=500, message=str(e), message_code=9999)
+                # Log unexpected exceptions with full details
+                self.logger.error(f"Unexpected error in {func.__name__}: {type(e).__name__}: {str(e)}", exc_info=True)
+                handle_exceptions(self, e)
 
         @functools.wraps(func)
         def sync_wrapper(self, *args, **kwargs):
             try:
                 return func(self, *args, **kwargs)
-            except GeneralOperateException as e:
-                # If it's already a GeneralOperateException, return it directly
-                return e
             except Exception as e:
                 # For other exceptions, return self.__exc instance
-                return self.__exc(status_code=500, message=str(e), message_code=9999)
+                handle_exceptions(self, e)
 
         # Return appropriate wrapper based on function type
         if asyncio.iscoroutinefunction(func):
@@ -129,89 +242,126 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
         return {"success": True, "message": "Cache cleared successfully"}
 
     @exception_handler
-    async def read_data_by_id(self, id_value: set):
+    async def read_data_by_id(self, id_value: set) -> list[T]:
         """Read data with cache-first strategy and null value protection"""
+        if not id_value:
+            return []
+
+        operation_context = f"read_data_by_id(table={self.table_name}, ids={len(id_value)})"
+        self.logger.debug(f"Starting {operation_context}")
+
         try:
             results = []
             cache_miss_ids = set()
             null_marked_ids = set()
+            failed_cache_ops = []
 
             # 1. Try to get data from cache
             for id_key in id_value:
-                # Check for null marker first
-                null_key = f"{self.table_name}:{id_key}:null"
-                is_null_marked = await self.redis.exists(null_key)
+                try:
+                    # Check for null marker first
+                    null_key = f"{self.table_name}:{id_key}:null"
+                    is_null_marked = await self.redis.exists(null_key)
 
-                if is_null_marked:
-                    null_marked_ids.add(id_key)
-                    continue
+                    if is_null_marked:
+                        null_marked_ids.add(id_key)
+                        continue
 
-                # Try to get actual data from cache
-                cached_data = await self.get(self.table_name, {str(id_key)})
-                if cached_data:
-                    # Parse cached data and convert to schema
-                    for cache_item in cached_data:
-                        data_value = list(cache_item.values())[0]
-                        if isinstance(data_value, str):
+                    # Try to get actual data from cache
+                    cached_data = await self.get(self.table_name, {str(id_key)})
+                    if cached_data:
+                        # Parse cached data and convert to schema
+                        for cache_item in cached_data:
+                            data_value = list(cache_item.values())[0]
+                            if isinstance(data_value, str):
+                                try:
+                                    data_value = json.loads(data_value)
+                                except json.JSONDecodeError as json_err:
+                                    self.logger.warning(f"Invalid JSON in cache for {self.table_name}:{id_key}: {json_err}")
+                                    cache_miss_ids.add(id_key)
+                                    continue
+
+                            # Convert to main schema
                             try:
-                                data_value = json.loads(data_value)
-                            except json.JSONDecodeError:
-                                pass
+                                schema_data = self.main_schemas(**data_value)
+                                results.append(schema_data)
+                            except Exception as schema_err:
+                                self.logger.warning(f"Schema validation failed for {self.table_name}:{id_key}: {schema_err}")
+                                cache_miss_ids.add(id_key)
+                    else:
+                        cache_miss_ids.add(id_key)
 
-                        # Convert to main schema
-                        schema_data = self.main_schemas(**data_value)
-                        results.append(schema_data)
-                else:
+                except (redis.RedisError, Exception) as cache_err:
+                    self.logger.warning(f"Cache operation failed for {self.table_name}:{id_key}: {cache_err}")
+                    failed_cache_ops.append(id_key)
                     cache_miss_ids.add(id_key)
 
             # 2. For cache misses, read from SQL
             if cache_miss_ids:
-                # Use SQL read method from parent class
-                sql_results = await self.read_sql(
-                    table_name=self.table_name,
-                    filters={"id": list(cache_miss_ids)}
-                    if len(cache_miss_ids) > 1
-                    else None,
-                )
+                try:
+                    sql_results = await self._fetch_from_sql(cache_miss_ids)
 
-                if len(cache_miss_ids) == 1:
-                    # For single ID, use read_one
-                    single_id = next(iter(cache_miss_ids))
-                    single_result = await self.read_one(self.table_name, single_id)
-                    sql_results = [single_result] if single_result else []
+                    # Process SQL results
+                    found_ids = set()
+                    cache_data_to_set = {}
 
-                # Process SQL results
-                found_ids = set()
-                cache_data_to_set = {}
+                    for sql_row in sql_results:
+                        if sql_row:
+                            try:
+                                # Convert to main schema
+                                schema_data = self.main_schemas(**sql_row)
+                                results.append(schema_data)
 
-                for sql_row in sql_results:
-                    if sql_row:
-                        # Convert to main schema
-                        schema_data = self.main_schemas(**sql_row)
-                        results.append(schema_data)
+                                # Prepare for cache storage (only if cache is working)
+                                if sql_row["id"] not in failed_cache_ops:
+                                    found_ids.add(sql_row["id"])
+                                    cache_data_to_set[str(sql_row["id"])] = json.dumps(sql_row, default=str)
+                            except Exception as schema_err:
+                                self.logger.error(f"Schema validation failed for SQL result {sql_row.get('id', 'unknown')}: {schema_err}")
+                                continue
 
-                        # Prepare for cache storage
-                        found_ids.add(sql_row["id"])
-                        cache_data_to_set[str(sql_row["id"])] = json.dumps(sql_row)
+                    # 3. Cache the found data (with error resilience)
+                    if cache_data_to_set:
+                        try:
+                            cache_success = await self.set_cache(self.table_name, cache_data_to_set)
+                            if not cache_success:
+                                self.logger.warning(f"Cache write failed for {len(cache_data_to_set)} items in {operation_context}")
+                        except Exception as cache_err:
+                            self.logger.warning(f"Cache write error in {operation_context}: {cache_err}")
 
-                # 3. Cache the found data
-                if cache_data_to_set:
-                    await self.set_cache(self.table_name, cache_data_to_set)
+                    # 4. Mark missing IDs with null values (5 minutes expiry)
+                    missing_ids = cache_miss_ids - found_ids
+                    for missing_id in missing_ids:
+                        if missing_id not in failed_cache_ops:
+                            try:
+                                null_key = f"{self.table_name}:{missing_id}:null"
+                                await self.set_null_key(null_key, 300)  # 5 minutes
+                            except Exception as null_err:
+                                self.logger.warning(f"Failed to set null marker for {missing_id}: {null_err}")
 
-                # 4. Mark missing IDs with null values (5 minutes expiry)
-                missing_ids = cache_miss_ids - found_ids
-                for missing_id in missing_ids:
-                    null_key = f"{self.table_name}:{missing_id}:null"
-                    await self.set_null_key(null_key, 300)  # 5 minutes
+                except Exception as sql_err:
+                    self.logger.error(f"SQL fallback failed in {operation_context}: {sql_err}")
+                    raise self.__exc(
+                        status_code=500,
+                        message=f"Both cache and SQL operations failed: {str(sql_err)}",
+                        message_code=9996
+                    )
 
+            self.logger.debug(f"Completed {operation_context}, returned {len(results)} records")
             return results
 
-        except Exception:
-            # Fallback strategy: read directly from SQL
-            return await self._read_data_fallback(id_value)
+        except self.__exc:
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error in {operation_context}: {str(e)}")
+            raise self.__exc(
+                status_code=500,
+                message=f"Unexpected error during data read: {str(e)}",
+                message_code=9995
+            )
 
     @exception_handler
-    async def read_data_by_filter(self, filters: dict[str, Any], limit: int | None = None, offset: int = 0):
+    async def read_data_by_filter(self, filters: dict[str, Any], limit: int | None = None, offset: int = 0) -> list[T]:
         """Read data by filter conditions with optional pagination"""
         try:
             # Use SQL read method with filters
@@ -234,23 +384,39 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
         except self.__exc as e:
             raise e
 
-    async def _read_data_fallback(self, id_value: set):
-        """Fallback strategy when cache fails - read directly from SQL"""
+    async def _fetch_from_sql(self, id_value: set) -> list[dict[str, Any]]:
+        """Fetch data from SQL with optimized bulk operations"""
+        if not id_value:
+            return []
+
         try:
-            sql_results = []
-            for id_key in id_value:
-                result = await self.read_one(self.table_name, id_key)
-                if result:
-                    schema_data = self.main_schemas(**result)
-                    sql_results.append(schema_data)
-            return sql_results
-        except self.__exc as e:
-            raise e
+            if len(id_value) == 1:
+                # Single ID, use read_one for better error reporting
+                single_id = next(iter(id_value))
+                single_result = await self.read_one(self.table_name, single_id)
+                return [single_result] if single_result else []
+            else:
+                # Multiple IDs, use bulk read with filters
+                sql_results = await self.read_sql(
+                    table_name=self.table_name,
+                    filters={"id": list(id_value)}
+                )
+                return sql_results if sql_results else []
+
+        except self.__exc:
+            raise
+        except Exception as e:
+            self.logger.error(f"SQL fetch failed for {len(id_value)} IDs in table {self.table_name}: {str(e)}")
+            raise self.__exc(
+                status_code=500,
+                message=f"Database read operation failed: {str(e)}",
+                message_code=9994
+            )
 
     @exception_handler
-    async def create_data(self, data: list, session=None):
+    async def create_data(self, data: list[dict], session=None) -> list[T]:
         """Create data in SQL only (no cache write) - uses bulk insert for better performance
-        
+
         Args:
             data: List of data to create
             session: Optional AsyncSession for transaction management
@@ -268,8 +434,13 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
             try:
                 create_item = self.create_schemas(**item)
                 validated_data.append(create_item.model_dump())
-            except Exception:
-                # Skip invalid items, could add logging here
+            except (TypeError, ValueError) as e:
+                # Schema validation failed - skip invalid items
+                self.logger.warning(f"Schema validation failed for item in create_data: {type(e).__name__}: {str(e)}")
+                continue
+            except AttributeError as e:
+                # Invalid attribute access - skip
+                self.logger.warning(f"Invalid attribute in create_data item: {str(e)}")
                 continue
 
         if not validated_data:
@@ -323,9 +494,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
         return await self.create_data(create_data_list, session=session)
 
     @exception_handler
-    async def update_data(self, data: list[dict[str, Any]], where_field: str = "id", session=None):
-        """Update data with bulk operations and double delete cache strategy
-        
+    async def update_data(self, data: list[dict[str, Any]], where_field: str = "id", session=None) -> list[T]:
+        """Update data with bulk operations and enhanced cache consistency
+
         Args:
             data: List of dictionaries containing update data, each must include the where_field
             where_field: Field name to use in WHERE clause (default: "id")
@@ -334,20 +505,24 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
         if not data:
             return []
 
+        operation_context = f"update_data(table={self.table_name}, records={len(data)}, field={where_field})"
+        self.logger.debug(f"Starting {operation_context}")
+
         # Prepare data for bulk update
         update_list = []
         cache_keys_to_delete = []
+        validation_errors = []
 
-        for update_item in data:
+        for idx, update_item in enumerate(data):
             if where_field not in update_item:
-                raise self.__exc(status_code=400, message=f"Missing '{where_field}' field in update data", message_code=214)
+                validation_errors.append(f"Item {idx}: Missing '{where_field}' field")
+                continue
 
             where_value = update_item[where_field]
 
             try:
                 # Validate with update schema
                 update_schema_item = self.update_schemas(**update_item)
-
                 validated_update_data = update_schema_item.model_dump(exclude_unset=True)
 
                 # Extract update fields (excluding the where_field)
@@ -355,6 +530,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
 
                 # Validate update data
                 if not validated_update_data:
+                    self.logger.warning(f"Item {idx}: No valid update fields after validation")
                     continue
 
                 # Add to bulk update list in new format
@@ -365,52 +541,83 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
                     cache_keys_to_delete.append(str(where_value))
 
             except Exception as e:
-                # Skip invalid update data
-                raise self.__exc(
-                    status_code=400, message=str(e), message_code=215)
+                validation_errors.append(f"Item {idx}: {str(e)}")
+
+        # Report validation errors if any
+        if validation_errors:
+            error_msg = "Validation errors: " + "; ".join(validation_errors)
+            self.logger.error(f"{operation_context} - {error_msg}")
+            raise self.__exc(status_code=400, message=error_msg, message_code=215)
 
         if not update_list:
+            self.logger.warning(f"{operation_context} - No valid update data after validation")
             return []
 
-        # 1. First delete from cache (bulk operation)
-        try:
-            if cache_keys_to_delete:
-                await CacheOperate.delete_cache(self, self.table_name, set(cache_keys_to_delete))
+        cache_delete_errors = []
+
+        # 1. Pre-update cache cleanup (best effort)
+        if cache_keys_to_delete:
+            try:
+                deleted_count = await CacheOperate.delete_cache(self, self.table_name, set(cache_keys_to_delete))
+                self.logger.debug(f"Pre-update cache cleanup: deleted {deleted_count} entries")
 
                 # Also delete null markers if they exist (only for id-based updates)
                 for record_id in cache_keys_to_delete:
                     null_key = f"{self.table_name}:{record_id}:null"
                     try:
                         await self.delete_null_key(null_key)
-                    except Exception:
-                        pass
-        except Exception:
-            # Cache delete failed, but continue with SQL update
-            pass
+                    except Exception as null_err:
+                        cache_delete_errors.append(f"null marker {record_id}: {null_err}")
 
-        # 2. Bulk update SQL data, pass session if provided
-        updated_records = await self.update_sql(self.table_name, update_list, where_field, session=session)
+            except Exception as cache_err:
+                cache_delete_errors.append(f"pre-update cleanup: {cache_err}")
+                self.logger.warning(f"Pre-update cache cleanup failed in {operation_context}: {cache_err}")
 
-        # Convert to main schemas
-        results = []
-        for record in updated_records:
-            if record:
-                schema_data = self.main_schemas(**record)
-                results.append(schema_data)
-
-        # 3. Second delete from cache (ensure consistency)
+        # 2. Bulk update SQL data
         try:
-            if cache_keys_to_delete:
-                await CacheOperate.delete_cache(self, self.table_name, set(cache_keys_to_delete))
-        except Exception:
-            # Second cache delete failed, but data is updated
-            pass
+            updated_records = await self.update_sql(self.table_name, update_list, where_field, session=session)
+        except Exception as sql_err:
+            self.logger.error(f"SQL update failed in {operation_context}: {sql_err}")
+            raise
 
-        if len(results) != len(data):
-            raise self.__exc(status_code=400, message="not all data can update", message_code=217)
+        # Convert to main schemas with error handling
+        results = []
+        schema_errors = []
 
+        for idx, record in enumerate(updated_records):
+            if record:
+                try:
+                    schema_data = self.main_schemas(**record)
+                    results.append(schema_data)
+                except Exception as schema_err:
+                    schema_errors.append(f"Record {idx}: {schema_err}")
+                    self.logger.error(f"Schema conversion failed for updated record {record.get('id', idx)}: {schema_err}")
+
+        # 3. Post-update cache cleanup (ensure consistency)
+        if cache_keys_to_delete:
+            try:
+                deleted_count = await CacheOperate.delete_cache(self, self.table_name, set(cache_keys_to_delete))
+                self.logger.debug(f"Post-update cache cleanup: deleted {deleted_count} entries")
+            except Exception as cache_err:
+                cache_delete_errors.append(f"post-update cleanup: {cache_err}")
+                self.logger.warning(f"Post-update cache cleanup failed in {operation_context}: {cache_err}")
+
+        # Log cache operation issues (non-fatal)
+        if cache_delete_errors:
+            self.logger.warning(f"Cache delete errors in {operation_context}: {'; '.join(cache_delete_errors)}")
+
+        # Validate that all records were updated successfully
+        if len(results) != len(update_list):
+            missing_count = len(update_list) - len(results)
+            error_msg = f"Update incomplete: {missing_count} of {len(update_list)} records failed to update"
+            if schema_errors:
+                error_msg += f". Schema errors: {'; '.join(schema_errors)}"
+
+            self.logger.error(f"{operation_context} - {error_msg}")
+            raise self.__exc(status_code=400, message=error_msg, message_code=217)
+
+        self.logger.debug(f"Completed {operation_context}, updated {len(results)} records")
         return results
-
 
     @exception_handler
     async def update_by_foreign_key(self, foreign_key_field: str, foreign_key_value: Any, data: list[Any], session=None) -> None:
@@ -494,8 +701,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
                 # Convert id to appropriate type
                 record_id = int(id_key) if str(id_key).isdigit() else id_key
                 validated_ids.append(record_id)
-            except Exception:
-                # Skip invalid IDs
+            except (ValueError, TypeError) as e:
+                # Skip invalid IDs - log for debugging
+                self.logger.debug(f"Skipping invalid ID in delete_data: {id_key} - {type(e).__name__}")
                 continue
 
         if not validated_ids:
@@ -513,8 +721,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
                     str(record_id) for record_id in successfully_deleted_ids
                 }
                 await CacheOperate.delete_cache(self, self.table_name, cache_keys)
-            except Exception:
-                # Cache delete failed, but SQL delete succeeded
+            except (redis.RedisError, AttributeError) as e:
+                # Cache delete failed, but SQL delete succeeded - log but don't fail
+                self.logger.warning(f"Cache cleanup failed in delete_data: {type(e).__name__}: {str(e)}")
                 pass
 
             # 3. Delete null markers if they exist
@@ -522,8 +731,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
                 try:
                     null_key = f"{self.table_name}:{record_id}:null"
                     await self.delete_null_key(null_key)
-                except Exception:
-                    # Null marker delete failed, but main delete succeeded
+                except (redis.RedisError, AttributeError) as e:
+                    # Null marker delete failed, but main delete succeeded - non-critical
+                    self.logger.debug(f"Failed to delete null marker for {record_id}: {type(e).__name__}")
                     pass
 
         return successfully_deleted_ids
@@ -556,14 +766,26 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate):
                         null_key = f"{self.table_name}:{record_id}:null"
                         try:
                             await self.delete_null_key(null_key)
-                        except Exception:
+                        except (redis.RedisError, AttributeError) as e:
+                            # Non-critical error - log but continue
+                            self.logger.debug(f"Failed to delete null marker in delete_filter_data: {type(e).__name__}")
                             pass
 
-                except Exception:
-                    # Cache delete failed, but SQL delete succeeded
+                except (redis.RedisError, AttributeError) as e:
+                    # Cache delete failed, but SQL delete succeeded - non-critical
+                    self.logger.warning(f"Cache cleanup failed in delete_filter_data: {type(e).__name__}")
                     pass
 
             return deleted_ids
 
-        except Exception:
+        except (DBAPIError, self.__exc) as e:
+            # Database or known errors - re-raise
+            raise e
+        except (ValueError, TypeError, KeyError) as e:
+            # Data validation errors
+            self.logger.error(f"Filter validation error in delete_filter_data: {type(e).__name__}: {str(e)}")
+            return []
+        except Exception as e:
+            # Generic exception handling for delete_filter_data - return empty list
+            self.logger.error(f"Error in delete_filter_data: {type(e).__name__}: {str(e)}")
             return []

@@ -632,7 +632,7 @@ class TestSQLOperateCount:
             mock_result.fetchone.return_value = mock_row
             mock_session.execute.return_value = mock_result
 
-            result = await sql_operate_postgres.count("users")
+            result = await sql_operate_postgres.count_sql("users")
 
             assert result == 5
 
@@ -650,7 +650,7 @@ class TestSQLOperateCount:
             mock_result.fetchone.return_value = mock_row
             mock_session.execute.return_value = mock_result
 
-            result = await sql_operate_postgres.count("users", filters)
+            result = await sql_operate_postgres.count_sql("users", filters)
 
             assert result == 3
 
@@ -689,60 +689,6 @@ class TestSQLOperateHealthCheck:
             result = await sql_operate_postgres.health_check()
 
             assert result is False
-
-
-class TestSQLOperateExceptionHandler:
-    """Test exception handling - testing the decorator directly"""
-
-    def test_exception_handler_asyncpg_error(self, sql_operate_postgres):
-        """Test exception handler with asyncpg error"""
-        # Mock asyncpg error with proper args
-        pg_error = asyncpg.PostgresError("Unique constraint violation")
-        pg_error.sqlstate = "23505"  # Unique violation
-        db_error = DBAPIError("PostgreSQL error", None, pg_error)
-
-        # Test the exception handler wrapper directly
-        @sql_operate_postgres.exception_handler
-        def test_func(self):
-            raise db_error
-
-        with pytest.raises(GeneralOperateException) as exc_info:
-            test_func(sql_operate_postgres)
-
-        assert exc_info.value.status_code == 487  # Generic database error status code
-        assert exc_info.value.message_code == "UNKNOWN"  # Generic error code
-
-    def test_exception_handler_mysql_error(self, sql_operate_mysql):
-        """Test exception handler with MySQL error"""
-        # Mock MySQL error
-        mysql_error = pymysql.Error(1062, "Duplicate entry")
-        db_error = DBAPIError("MySQL error", None, mysql_error)
-
-        # Test the exception handler wrapper directly
-        @sql_operate_mysql.exception_handler
-        def test_func(self):
-            raise db_error
-
-        with pytest.raises(GeneralOperateException) as exc_info:
-            test_func(sql_operate_mysql)
-
-        assert exc_info.value.status_code == 486
-        assert exc_info.value.message_code == 1062
-
-    def test_exception_handler_unmapped_instance_error(self, sql_operate_postgres):
-        """Test exception handler with UnmappedInstanceError"""
-
-        # Test the exception handler wrapper directly
-        @sql_operate_postgres.exception_handler
-        def test_func(self):
-            raise UnmappedInstanceError("Unmapped instance")
-
-        with pytest.raises(GeneralOperateException) as exc_info:
-            test_func(sql_operate_postgres)
-
-        assert exc_info.value.status_code == 486
-        assert exc_info.value.message_code == 2
-
 
 @pytest.mark.asyncio
 async def test_integration_workflow(sql_operate_postgres):
@@ -798,7 +744,7 @@ async def test_integration_workflow(sql_operate_postgres):
         assert users[0]["name"] == "John"
 
         # 3. Count users
-        count = await sql_operate_postgres.count("users")
+        count = await sql_operate_postgres.count_sql("users")
         assert count == 5
 
         # 4. Update user

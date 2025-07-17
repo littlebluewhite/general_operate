@@ -63,7 +63,7 @@ app.add_middleware(
 app.include_router(APITutorialRouter(db=db, redis=redis_db).create_router())
 
 @app.exception_handler(GeneralOperateException)
-async def alarm_exception_handler(request: Request, exc: GeneralOperateException):
+async def operate_exception_handler(request: Request, exc: GeneralOperateException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"message": f"{exc.message}", "message_code": f"{exc.message_code}"},
@@ -76,4 +76,4 @@ async def alarm_exception_handler(request: Request, exc: GeneralOperateException
 
 if __name__ == "__main__":
     asyncio.run(init_db())
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8005)

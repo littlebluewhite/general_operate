@@ -2,8 +2,8 @@ from sqlalchemy.ext.asyncio.engine import create_async_engine
 
 
 class SQLClient:
-    def __init__(self, db_config: dict, echo=False, engine_type="postgresql"):
-        self.engine_type = engine_type
+    def __init__(self, db_config: dict, echo=False):
+        self.engine_type = db_config["engine"]
         self.host = db_config["host"]
         self.port = db_config["port"]
         self.db = db_config["db"]
@@ -23,6 +23,7 @@ class SQLClient:
             # MySQL with aiomysql driver for async support
             self.url = f"mysql+aiomysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.db}"
 
+        print(self.url)
         self.__engine = create_async_engine(
             self.url,  # Database connection URL
             echo=echo,  # SQL query logging (False for production)

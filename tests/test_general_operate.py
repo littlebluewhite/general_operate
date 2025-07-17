@@ -47,6 +47,16 @@ class MockModule:
         self.update_schemas = UpdateSchema
 
 
+# Create a concrete implementation of GeneralOperate for testing
+class MockGeneralOperate(GeneralOperate):
+    def __init__(self, module, database_client, redis_client, influxdb=None, exc=GeneralOperateException):
+        self._module = module
+        super().__init__(database_client, redis_client, influxdb, exc)
+    
+    def get_module(self):
+        return self._module
+
+
 @pytest.fixture
 def mock_module():
     """Create a mock module similar to tutorial schemas"""
@@ -79,7 +89,7 @@ def general_operate(
     mock_module, mock_database_client, mock_redis_client, mock_influxdb
 ):
     """Create a GeneralOperate instance with mocked dependencies"""
-    return GeneralOperate(
+    return MockGeneralOperate(
         module=mock_module,
         database_client=mock_database_client,
         redis_client=mock_redis_client,
@@ -95,7 +105,7 @@ class TestGeneralOperateInit:
         self, mock_module, mock_database_client, mock_redis_client, mock_influxdb
     ):
         """Test successful initialization"""
-        general_op = GeneralOperate(
+        general_op = MockGeneralOperate(
             module=mock_module,
             database_client=mock_database_client,
             redis_client=mock_redis_client,
@@ -353,18 +363,21 @@ class TestGeneralOperateReadData:
         """Test read_data fallback strategy"""
         with (
             patch.object(CacheOperate, "get") as mock_get,
-            patch.object(general_operate, "_read_data_fallback") as mock_fallback,
+            patch.object(general_operate, "_fetch_from_sql") as mock_fetch,
         ):
             # Mock cache error
             mock_get.side_effect = Exception("Redis error")
-            mock_fallback.return_value = [
-                general_operate.main_schemas(id=1, name="Test", title="Title")
+            mock_fetch.return_value = [
+                {"id": 1, "name": "Test", "title": "Title", "enable": True}
             ]
+
+            # Mock redis exists to return False
+            general_operate.redis.exists = AsyncMock(return_value=False)
 
             result = await general_operate.read_data_by_id({1})
 
             assert len(result) == 1
-            mock_fallback.assert_called_once_with({1})
+            mock_fetch.assert_called_once_with({1})
 
 
 class TestGeneralOperateCreateData:
@@ -574,11 +587,20 @@ class TestGeneralOperateDeleteFilterData:
         """Test successful delete_filter_data"""
         filters = {"enable": False}
 
-        with patch.object(
-            SQLOperate, "delete_filter", new_callable=AsyncMock
-        ) as mock_delete_filter:
+        with (
+            patch.object(
+                general_operate, "delete_filter", new_callable=AsyncMock
+            ) as mock_delete_filter,
+            patch.object(
+                general_operate, "delete_cache", new_callable=AsyncMock
+            ) as mock_delete_cache,
+            patch.object(
+                general_operate, "delete_null_key", new_callable=AsyncMock
+            ) as mock_delete_null_key,
+        ):
             mock_delete_filter.return_value = [1, 2, 3]  # List of deleted IDs
-            general_operate.redis.delete = AsyncMock(return_value=1)
+            mock_delete_cache.return_value = 3  # Mock cache delete success
+            mock_delete_null_key.return_value = True  # Mock null key delete success
 
             result = await general_operate.delete_filter_data(filters)
 
@@ -610,7 +632,7 @@ class TestGeneralOperateDeleteFilterData:
         filters = {"enable": False}
 
         with patch.object(
-            SQLOperate, "delete_filter", new_callable=AsyncMock
+            general_operate, "delete_filter", new_callable=AsyncMock
         ) as mock_delete_filter:
             mock_delete_filter.side_effect = Exception("SQL error")
 
@@ -710,10 +732,10 @@ async def test_integration_workflow(general_operate):
         mock_session.execute.side_effect = mock_execute_side_effect
 
         # Setup Redis mocks
-        general_operate.redis.exists.return_value = False
-        general_operate.redis.ping.return_value = True
-        general_operate.redis.setex.return_value = True
-        general_operate.redis.delete.return_value = 1
+        general_operate.redis.exists = AsyncMock(return_value=False)
+        general_operate.redis.ping = AsyncMock(return_value=True)
+        general_operate.redis.setex = AsyncMock(return_value=True)
+        general_operate.redis.delete = AsyncMock(return_value=1)
         mock_get.return_value = []  # Cache miss
         mock_set.return_value = True
 

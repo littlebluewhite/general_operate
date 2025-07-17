@@ -45,17 +45,6 @@ class TestRedisOperate:
         assert {"key": "value2"} in values
 
     @pytest.mark.asyncio
-    async def test_get_with_redis_error(self, redis_operate, mock_redis):
-        """Test get method handling Redis error"""
-        mock_redis.hmget.side_effect = RedisError("Error 123: Connection failed")
-
-        with pytest.raises(GeneralOperateException) as exc_info:
-            await redis_operate.get("test_table", {"field1"})
-
-        assert exc_info.value.status_code == 487
-        assert exc_info.value.message_code == 123
-
-    @pytest.mark.asyncio
     async def test_set_with_empty_data(self, redis_operate):
         """Test set method with empty data"""
         result = await redis_operate.set_cache("test_table", {})
@@ -155,7 +144,7 @@ class TestRedisOperate:
         """Test count method"""
         mock_redis.hlen.return_value = 5
 
-        result = await redis_operate.count("test_table")
+        result = await redis_operate.count_cache("test_table")
 
         mock_redis.hlen.assert_called_once_with("test_table")
         assert result == 5
@@ -206,18 +195,6 @@ class TestRedisOperate:
         finally:
             json.loads = original_loads
 
-    @pytest.mark.asyncio
-    async def test_exception_handler_generic_exception(self, redis_operate, mock_redis):
-        """Test exception handler with generic exception"""
-        mock_redis.hmget.side_effect = ValueError("Unexpected error")
-
-        with pytest.raises(GeneralOperateException) as exc_info:
-            await redis_operate.get("test_table", {"field1"})
-
-        assert exc_info.value.status_code == 487
-        assert exc_info.value.message_code == 999
-        assert "Unexpected error" in str(exc_info.value.message)
-
 
 @pytest.mark.asyncio
 async def test_integration_workflow(redis_operate, mock_redis):
@@ -241,7 +218,7 @@ async def test_integration_workflow(redis_operate, mock_redis):
     assert len(result) == 2
 
     # 4. Count fields
-    count = await redis_operate.count("users")
+    count = await redis_operate.count_cache("users")
     assert count == 2
 
     # 5. Delete a field

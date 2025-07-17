@@ -1,6 +1,5 @@
-from typing import Any
+from typing import Any, get_args
 from contextlib import asynccontextmanager
-
 import sys
 from pathlib import Path
 
@@ -14,13 +13,24 @@ from general_operate.utils.build_data import build_create_data, _extract_object_
 from tutorial.schemas import subtable, tutorial
 
 
+# Create specific operator classes that implement get_module
+class TutorialOperator(GeneralOperate):
+    def get_module(self):
+        return tutorial
+
+
+class SubtableOperator(GeneralOperate):
+    def get_module(self):
+        return subtable
+
+
 class APITutorialOperator:
     def __init__(self, api_schema, db, redis, influxdb=None):
         self.create_schemas = api_schema.create_schemas
         self.main_schemas = api_schema.main_schemas
         self.update_schemas = api_schema.update_schemas
-        self.tutorial_operate = GeneralOperate(module=tutorial, database_client=db, redis_client=redis, influxdb=influxdb)
-        self.subtable_operate = GeneralOperate(module=subtable, database_client=db, redis_client=redis, influxdb=influxdb)
+        self.tutorial_operate = TutorialOperator(database_client=db, redis_client=redis, influxdb=influxdb)
+        self.subtable_operate = SubtableOperator(database_client=db, redis_client=redis, influxdb=influxdb)
 
     @asynccontextmanager
     async def transaction(self):
@@ -71,7 +81,7 @@ class APITutorialOperator:
             annotation = subtables_field.annotation
 
             # Get the type arguments from the list type
-            from typing import get_args
+
             type_args = get_args(annotation)
 
             if not type_args:

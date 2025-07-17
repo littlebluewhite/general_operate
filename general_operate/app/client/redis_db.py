@@ -1,6 +1,7 @@
+import asyncio
+
 import redis.asyncio as redis
 from redis.cluster import ClusterNode
-
 
 class RedisDB:
     def __init__(self, redis_config, decode_responses=False):
@@ -51,3 +52,21 @@ class RedisDB:
             return True
         else:
             return False
+
+# async def wilson():
+#     redis_config = {
+#         "host": "127.0.0.1:6379",
+#         "db": 0,
+#         "user": "",
+#         "password": "",
+#         "decode_responses": "True"
+#     }
+#     r =CacheOperate(RedisDB(redis_config).redis_client())
+#     await r.redis.hsetex("test", mapping=redis_config)
+#     await r.redis.expire("test", 10)
+#     a = await r.redis.hgetall("test")
+#     print(a)
+
+if __name__ == "__main__":
+    pass
+    # asyncio.run(wilson())

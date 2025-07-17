@@ -13,7 +13,7 @@ class InfluxOperate:
     def __init__(self, influxdb: InfluxDB = None, exc=GeneralOperateException):
         self.influxdb = influxdb
         self.__exc = exc
-        
+
         if influxdb is not None:
             self.__bucket = influxdb.bucket
             self.__org = influxdb.org
@@ -42,10 +42,10 @@ class InfluxOperate:
         def wrapper(self, *args, **kwargs):
             try:
                 return func(self, *args, **kwargs)
-            except NewConnectionError:
+            except NewConnectionError as e:
                 raise self.__exc(
                     status_code=488,
-                    message="InfluxDB connection failed",
+                    message=f"InfluxDB connection failed: {str(e)}",
                     message_code=1,
                 )
             except ApiException as e:
@@ -54,9 +54,29 @@ class InfluxOperate:
                     message=str(e.message).replace("\n", ""),
                     message_code=e.status,
                 )
-            except Exception:
+            except (ValueError, TypeError) as e:
+                # Data validation errors
                 raise self.__exc(
-                    status_code=488, message="Unknown error", message_code=99
+                    status_code=400,
+                    message=f"InfluxDB data validation error: {str(e)}",
+                    message_code=98
+                )
+            except AttributeError as e:
+                # Attribute access errors (missing client, etc)
+                raise self.__exc(
+                    status_code=488,
+                    message=f"InfluxDB configuration error: {str(e)}",
+                    message_code=97
+                )
+            except Exception as e:
+                # Log unexpected errors with details
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Unexpected InfluxDB error: {type(e).__name__}: {str(e)}", exc_info=True)
+                raise self.__exc(
+                    status_code=488, 
+                    message=f"InfluxDB error: {type(e).__name__}: {str(e)}", 
+                    message_code=99
                 )
 
         return wrapper

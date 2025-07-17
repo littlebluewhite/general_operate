@@ -1,5 +1,3 @@
-import asyncio
-import functools
 import re
 from typing import Any
 
@@ -8,8 +6,6 @@ import pymysql
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.exc import UnmappedInstanceError
-from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 
 from ..app.client.database import SQLClient
 from ..utils.exception import GeneralOperateException
@@ -56,7 +52,7 @@ class SQLOperate:
         """Validate data values to prevent issues with special characters or types"""
         if value is None:
             return  # Allow null values
-            
+
         # Check if value is in null_set, but only for hashable types
         try:
             if value in self.null_set:
@@ -64,7 +60,7 @@ class SQLOperate:
         except TypeError:
             # Value is unhashable (like list, dict), which is fine - continue validation
             pass
-            
+
         # For lists and dicts, they should be serialized to JSON for database storage
         # This validation just ensures they are valid Python objects that can be serialized
         if isinstance(value, (list, dict)):
@@ -198,11 +194,11 @@ class SQLOperate:
         # Don't clean filters for list values - handle them separately
         where_clauses = []
         params = {}
-        
+
         for key, value in filters.items():
             # Validate column name
             self._validate_identifier(key, "column name")
-            
+
             if isinstance(value, list):
                 # Handle list values with IN clause
                 if not value:  # Empty list
@@ -237,60 +233,10 @@ class SQLOperate:
 
         where_clause = " WHERE " + " AND ".join(where_clauses)
         return where_clause, params
-    @staticmethod
-    def exception_handler(func):
-        def handle_exceptions(self, e):
-            """Common exception handling logic"""
-            if isinstance(e, DBAPIError):
-                if isinstance(e.orig, AsyncAdapt_asyncpg_dbapi.Error):
-                    pg_error = e.orig
-                    message = str(pg_error).replace("\n", " ").replace("\r", " ").split(': ', 1)[1]
-                    code = getattr(pg_error, "sqlstate", "1") or "1"
-                    raise self.__exc(
-                        status_code=489, message=message, message_code=code
-                    )
-                elif isinstance(e.orig, pymysql.Error):
-                    code, msg = e.orig.args
-                    raise self.__exc(status_code=486, message=msg, message_code=code)
-                else:
-                    # Generic database error handling
-                    message = str(e).replace("\n", " ").replace("\r", " ")
-                    raise self.__exc(
-                        status_code=487, message=message, message_code="UNKNOWN"
-                    )
-            elif isinstance(e, UnmappedInstanceError):
-                raise self.__exc(
-                    status_code=486,
-                    message="id: one or more of ids is not exist",
-                    message_code=2,
-                )
-            else:
-                raise e
-        @functools.wraps(func)
-        async def async_wrapper(self, *args, **kwargs):
-            try:
-                return await func(self, *args, **kwargs)
-            except Exception as e:
-                handle_exceptions(self, e)
 
-        @functools.wraps(func)
-        def sync_wrapper(self, *args, **kwargs):
-            try:
-                return func(self, *args, **kwargs)
-            except Exception as e:
-                handle_exceptions(self, e)
-
-        # Return appropriate wrapper based on function type
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-
-    @exception_handler
     def _get_client(self) -> SQLClient:
         return self.__sqlClient
 
-    @exception_handler
     async def create_sql(
         self, table_name: str, data: dict[str, Any] | list[dict[str, Any]], session: AsyncSession = None
     ) -> list[dict[str, Any]]:
@@ -435,7 +381,6 @@ class SQLOperate:
                     await auto_session.rollback()
                     raise e
 
-    @exception_handler
     async def read_sql(
         self,
         table_name: str,
@@ -511,8 +456,7 @@ class SQLOperate:
             async with self._create_session() as auto_session:
                 return await _execute_read(auto_session)
 
-    @exception_handler
-    async def count(
+    async def count_sql(
         self, table_name: str, filters: dict[str, Any] | None = None, session: AsyncSession = None
     ) -> int:
         """Get the total count of records in a table with optional filters"""
@@ -537,7 +481,6 @@ class SQLOperate:
             async with self._create_session() as auto_session:
                 return await _execute_count(auto_session)
 
-    @exception_handler
     async def read_one(
         self, table_name: str, id_value: Any, id_column: str = "id", session: AsyncSession = None
     ) -> dict[str, Any] | None:
@@ -558,7 +501,6 @@ class SQLOperate:
             async with self._create_session() as auto_session:
                 return await _execute_read_one(auto_session)
 
-    @exception_handler
     async def update_sql(
         self,
         table_name: str,
@@ -624,7 +566,7 @@ class SQLOperate:
         # Helper function to execute the actual SQL operations
         async def _execute_updates(active_session: AsyncSession) -> list[dict[str, Any]]:
             updated_records = []
-            
+
             # Use individual updates within a transaction for better control
             # This ensures each update can have different fields and proper error handling
             for update_item in validated_updates:
@@ -680,7 +622,6 @@ class SQLOperate:
                     await auto_session.rollback()
                     raise e
 
-    @exception_handler
     async def delete_sql(
         self, table_name: str, id_values: Any | list[Any], id_column: str = "id", session: AsyncSession = None
     ) -> list[Any]:
@@ -710,7 +651,7 @@ class SQLOperate:
         # Helper function to execute the actual SQL operations
         async def _execute_deletes(active_session: AsyncSession) -> list[Any]:
             successfully_deleted = []
-            
+
             if len(id_list) == 1:
                 # Single delete for better error reporting
                 query = f"DELETE FROM {table_name} WHERE {id_column} = :id_value"
@@ -764,7 +705,6 @@ class SQLOperate:
                     raise e
 
 
-    @exception_handler
     async def delete_filter(self, table_name: str, filters: dict[str, Any], session: AsyncSession = None) -> list[Any]:
         """Delete multiple records based on filter conditions return ids"""
         self._validate_identifier(table_name, "table name")
@@ -790,14 +730,14 @@ class SQLOperate:
             select_query = f"SELECT id FROM {table_name}{where_clause}"
             select_result = await active_session.execute(text(select_query), params)
             ids_to_delete = [row[0] for row in select_result.fetchall()]
-            
+
             if not ids_to_delete:
                 return []
 
             # Then delete the records
             delete_query = f"DELETE FROM {table_name}{where_clause}"
             await active_session.execute(text(delete_query), params)
-            
+
             return ids_to_delete
 
         # Use external session if provided, otherwise create and manage our own
@@ -815,7 +755,6 @@ class SQLOperate:
                     await auto_session.rollback()
                     raise e
 
-    @exception_handler
     async def execute_query(
         self, query: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]] | dict[str, Any]:
@@ -837,19 +776,41 @@ class SQLOperate:
                     else 0
                 }
 
-    @exception_handler
     async def health_check(self) -> bool:
+        """Check if database connection is healthy"""
+        operation_context = f"health_check(engine_type={getattr(self.__sqlClient, 'engine_type', 'unknown')})"
+
         try:
             async with self._create_session() as session:
-                result = await session.execute(text("SELECT 1"))
-                return result.fetchone() is not None
-        except (
-            DBAPIError,
-            asyncpg.PostgresError,
-            pymysql.Error,
-            ConnectionError,
-            TimeoutError,
-        ):
+                # Use a simple query that works on both PostgreSQL and MySQL
+                result = await session.execute(text("SELECT 1 as health_check"))
+                row = result.fetchone()
+                is_healthy = row is not None and row[0] == 1
+
+                if not is_healthy:
+                    import structlog
+                    logger = structlog.get_logger()
+                    logger.warning(f"Database health check returned unexpected result: {row}")
+
+                return is_healthy
+
+        except (DBAPIError, asyncpg.PostgresError, pymysql.Error) as db_err:
+            # Log specific database errors but don't raise - health check should return boolean
+            import structlog
+            logger = structlog.get_logger()
+            logger.warning(f"Database health check failed in {operation_context}: {type(db_err).__name__}: {db_err}")
+            return False
+        except (ConnectionError, TimeoutError, OSError) as conn_err:
+            # Network/connection related errors
+            import structlog
+            logger = structlog.get_logger()
+            logger.warning(f"Connection error in {operation_context}: {type(conn_err).__name__}: {conn_err}")
+            return False
+        except Exception as e:
+            # Log unexpected errors
+            import structlog
+            logger = structlog.get_logger()
+            logger.error(f"Unexpected error in {operation_context}: {type(e).__name__}: {e}")
             return False
 
 

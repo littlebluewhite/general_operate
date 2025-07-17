@@ -1,7 +1,6 @@
-from typing import Optional
+
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # Original models for database operations
 class SubtableBasic(BaseModel):
@@ -11,12 +10,10 @@ class SubtableBasic(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-
 class Subtable(SubtableBasic):
     id: int = Field(gt=0, description="Unique identifier for the subtable")
 
     model_config = ConfigDict(from_attributes=True)
-
 
 class SubtableCreate(BaseModel):
     description: str = Field(default="", min_length=0, description="Description of the subtable content")
@@ -25,17 +22,13 @@ class SubtableCreate(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-
 class SubtableUpdate(BaseModel):
     id: int = Field(gt=0, description="Unique identifier for the subtable to update")
-    description: Optional[str] = Field(None, min_length=1, description="Updated description")
-    tutorial_id: Optional[int] = Field(None, gt=0, description="Updated parent tutorial ID")
-    author: Optional[str] = Field(None, min_length=1, description="Updated author")
+    description: str | None = Field(None, min_length=1, description="Updated description")
+    tutorial_id: int | None = Field(None, gt=0, description="Updated parent tutorial ID")
+    author: str | None = Field(None, min_length=1, description="Updated author")
 
     model_config = ConfigDict(from_attributes=True)
-
-
-
 
 # Database configuration settings
 table_name = "subtable"

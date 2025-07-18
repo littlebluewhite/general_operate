@@ -11,10 +11,10 @@ import pytest
 import redis
 from pydantic import BaseModel
 
-from general_operate.app.cache_operate import CacheOperate
-from general_operate.app.sql_operate import SQLOperate
+from general_operate.general_operate import CacheOperate
+from general_operate.general_operate import SQLOperate
 from general_operate.general_operate import GeneralOperate
-from general_operate.utils.exception import GeneralOperateException
+from general_operate.general_operate import GeneralOperateException
 
 
 # Mock module structure similar to tutorial schemas
@@ -692,7 +692,7 @@ class TestExceptionHandler:
 async def test_integration_workflow(general_operate):
     """Test complete workflow of GeneralOperate operations"""
     with (
-        patch.object(general_operate, "_create_session") as mock_session_ctx,
+        patch.object(general_operate, "create_external_session") as mock_session_ctx,
         patch.object(CacheOperate, "get") as mock_get,
         patch.object(CacheOperate, "set_cache") as mock_set,
     ):

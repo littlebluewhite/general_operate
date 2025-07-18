@@ -169,12 +169,7 @@ class SQLOperate:
                 message=f"No valid data provided for {operation}",
                 message_code=107,
             )
-
         return validated_data
-
-    def _create_session(self) -> AsyncSession:
-        """Create a new database session"""
-        return AsyncSession(self.__sqlClient.get_engine())
 
     def create_external_session(self) -> AsyncSession:
         """Create a new AsyncSession for external transaction management
@@ -372,7 +367,7 @@ class SQLOperate:
             return await _execute_insert(session)
         else:
             # Traditional behavior with auto-managed session
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 try:
                     result = await _execute_insert(auto_session)
                     await auto_session.commit()
@@ -453,7 +448,7 @@ class SQLOperate:
             return await _execute_read(session)
         else:
             # Traditional behavior with auto-managed session
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 return await _execute_read(auto_session)
 
     async def count_sql(
@@ -478,7 +473,7 @@ class SQLOperate:
         if session:
             return await _execute_count(session)
         else:
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 return await _execute_count(auto_session)
 
     async def read_one(
@@ -498,7 +493,7 @@ class SQLOperate:
         if session:
             return await _execute_read_one(session)
         else:
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 return await _execute_read_one(auto_session)
 
     async def update_sql(
@@ -613,7 +608,7 @@ class SQLOperate:
             return await _execute_updates(session)
         else:
             # Traditional behavior with auto-managed session
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 try:
                     result = await _execute_updates(auto_session)
                     await auto_session.commit()
@@ -695,7 +690,7 @@ class SQLOperate:
             return await _execute_deletes(session)
         else:
             # Traditional behavior with auto-managed session
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 try:
                     result = await _execute_deletes(auto_session)
                     await auto_session.commit()
@@ -746,7 +741,7 @@ class SQLOperate:
             return await _execute_delete_filter(session)
         else:
             # Traditional behavior with auto-managed session
-            async with self._create_session() as auto_session:
+            async with self.create_external_session() as auto_session:
                 try:
                     result = await _execute_delete_filter(auto_session)
                     await auto_session.commit()
@@ -758,7 +753,7 @@ class SQLOperate:
     async def execute_query(
         self, query: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]] | dict[str, Any]:
-        async with self._create_session() as session:
+        async with self.create_external_session() as session:
             result = await session.execute(text(query), params or {})
 
             if (
@@ -781,7 +776,7 @@ class SQLOperate:
         operation_context = f"health_check(engine_type={getattr(self.__sqlClient, 'engine_type', 'unknown')})"
 
         try:
-            async with self._create_session() as session:
+            async with self.create_external_session() as session:
                 # Use a simple query that works on both PostgreSQL and MySQL
                 result = await session.execute(text("SELECT 1 as health_check"))
                 row = result.fetchone()

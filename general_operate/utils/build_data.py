@@ -70,11 +70,11 @@ def compare_related_items(existing_items: list[dict],
     return to_create, to_update, to_delete_ids
 
 
-def _extract_object_fields(obj: Any,
-                           include_fields: list[str] | None = None,
-                           exclude_fields: list[str] | None = None,
-                           exclude_none: bool = True,
-                           field_mapping: dict[str, str] | None = None) -> dict:
+def extract_object_fields(obj: Any,
+                          include_fields: list[str] | None = None,
+                          exclude_fields: list[str] | None = None,
+                          exclude_none: bool = True,
+                          field_mapping: dict[str, str] | None = None) -> dict:
     """
     通用字段提取方法，支持動態字段配置
 
@@ -144,7 +144,7 @@ def build_create_data(sub: Any,
     else:
         exclude_fields = default_exclude
 
-    return _extract_object_fields(
+    return extract_object_fields(
         obj=sub,
         include_fields=include_fields,
         exclude_fields=exclude_fields,
@@ -170,7 +170,7 @@ def build_update_data(sub: Any,
         dict: 更新數據字典（只包含有變化的字段）
     """
     # 獲取新數據的所有字段
-    new_fields = _extract_object_fields(
+    new_fields = extract_object_fields(
         obj=sub,
         include_fields=include_fields,
         exclude_fields=exclude_fields,

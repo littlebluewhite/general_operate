@@ -1,11 +1,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import asyncpg
-import pymysql
 import pytest
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.exc import UnmappedInstanceError
 
 # Import directly to avoid circular import issues
 from general_operate.app.sql_operate import SQLOperate
@@ -201,7 +198,7 @@ class TestSQLOperateCreate:
         """Test successful create operation on PostgreSQL"""
         data = {"name": "John", "age": 25}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -224,7 +221,7 @@ class TestSQLOperateCreate:
         """Test successful create operation on MySQL"""
         data = {"name": "John", "age": 25}
 
-        with patch.object(sql_operate_mysql, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_mysql, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -271,7 +268,7 @@ class TestSQLOperateRead:
     @pytest.mark.asyncio
     async def test_read_all_records(self, sql_operate_postgres):
         """Test reading all records without filters"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -295,7 +292,7 @@ class TestSQLOperateRead:
         """Test reading with filters"""
         filters = {"name": "John"}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -312,7 +309,7 @@ class TestSQLOperateRead:
     @pytest.mark.asyncio
     async def test_read_with_ordering(self, sql_operate_postgres):
         """Test reading with ordering"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -332,7 +329,7 @@ class TestSQLOperateRead:
     @pytest.mark.asyncio
     async def test_read_with_pagination_postgresql(self, sql_operate_postgres):
         """Test reading with pagination on PostgreSQL"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -350,7 +347,7 @@ class TestSQLOperateRead:
     @pytest.mark.asyncio
     async def test_read_with_pagination_mysql(self, sql_operate_mysql):
         """Test reading with pagination on MySQL"""
-        with patch.object(sql_operate_mysql, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_mysql, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -398,7 +395,7 @@ class TestSQLOperateUpdate:
         """Test successful update operation on PostgreSQL"""
         data = {"name": "John Updated", "age": 26}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -421,7 +418,7 @@ class TestSQLOperateUpdate:
         """Test successful update operation on MySQL"""
         data = {"name": "John Updated", "age": 26}
 
-        with patch.object(sql_operate_mysql, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_mysql, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -449,7 +446,7 @@ class TestSQLOperateUpdate:
         """Test update when record is not found"""
         data = {"name": "John Updated"}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -470,7 +467,7 @@ class TestSQLOperateDelete:
     @pytest.mark.asyncio
     async def test_delete_success(self, sql_operate_postgres):
         """Test successful delete operation"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -489,7 +486,7 @@ class TestSQLOperateDelete:
     @pytest.mark.asyncio
     async def test_delete_not_found(self, sql_operate_postgres):
         """Test delete when record is not found"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -511,7 +508,7 @@ class TestSQLOperateDeleteMany:
         """Test successful delete_many operation"""
         filters = {"status": "inactive", "age": 18}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -540,7 +537,7 @@ class TestSQLOperateDeleteMany:
         """Test delete_many when no records match"""
         filters = {"status": "nonexistent"}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -583,7 +580,7 @@ class TestSQLOperateDeleteMany:
         """Test delete_many with null values in filters (should be filtered out)"""
         filters = {"status": "inactive", "age": -999999, "city": "null"}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -622,7 +619,7 @@ class TestSQLOperateCount:
     @pytest.mark.asyncio
     async def test_count_all_records(self, sql_operate_postgres):
         """Test counting all records"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -641,7 +638,7 @@ class TestSQLOperateCount:
         """Test counting with filters"""
         filters = {"active": True}
 
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -661,7 +658,7 @@ class TestSQLOperateHealthCheck:
     @pytest.mark.asyncio
     async def test_health_check_success(self, sql_operate_postgres):
         """Test successful health check"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -677,7 +674,7 @@ class TestSQLOperateHealthCheck:
     @pytest.mark.asyncio
     async def test_health_check_failure(self, sql_operate_postgres):
         """Test health check failure"""
-        with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
 
@@ -693,7 +690,7 @@ class TestSQLOperateHealthCheck:
 @pytest.mark.asyncio
 async def test_integration_workflow(sql_operate_postgres):
     """Test a complete workflow of SQL operations"""
-    with patch.object(sql_operate_postgres, "_create_session") as mock_session_ctx:
+    with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
         mock_session = AsyncMock()
         mock_session_ctx.return_value.__aenter__.return_value = mock_session
 

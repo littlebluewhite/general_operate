@@ -4,6 +4,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Generic, TypeVar
+from contextlib import asynccontextmanager
 
 import pymysql
 import redis
@@ -55,6 +56,27 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             operator=self.__class__.__name__,
             table=self.table_name
         )
+
+    @asynccontextmanager
+    async def transaction(self):
+        """
+        Transaction context manager for multi-table operations with ACID compliance.
+
+        This ensures that tutorial and subtable operations are executed within the same
+        database transaction, providing rollback capabilities if any operation fails.
+
+        Usage:
+            async with self.transaction() as session:
+                # Perform operations with session parameter
+                await self.tutorial_operate.create_data(data, session=session)
+                await self.subtable_operate.create_data(subtable_data, session=session)
+        """
+        session = self.create_external_session()
+        try:
+            async with session.begin():
+                yield session
+        finally:
+            await session.close()
 
     @abstractmethod
     def get_module(self):

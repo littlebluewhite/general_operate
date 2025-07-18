@@ -1,5 +1,4 @@
 from typing import Any, get_args
-from contextlib import asynccontextmanager
 import sys
 from pathlib import Path
 
@@ -9,7 +8,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from general_operate import GeneralOperate
-from general_operate.utils.build_data import build_create_data, _extract_object_fields
+from general_operate.utils.build_data import build_create_data, extract_object_fields
 from tutorial.schemas import subtable, tutorial
 
 
@@ -31,27 +30,6 @@ class APITutorialOperator:
         self.update_schemas = api_schema.update_schemas
         self.tutorial_operate = TutorialOperator(database_client=db, redis_client=redis, influxdb=influxdb)
         self.subtable_operate = SubtableOperator(database_client=db, redis_client=redis, influxdb=influxdb)
-
-    @asynccontextmanager
-    async def transaction(self):
-        """
-        Transaction context manager for multi-table operations with ACID compliance.
-        
-        This ensures that tutorial and subtable operations are executed within the same
-        database transaction, providing rollback capabilities if any operation fails.
-        
-        Usage:
-            async with self.transaction() as session:
-                # Perform operations with session parameter
-                await self.tutorial_operate.create_data(data, session=session)
-                await self.subtable_operate.create_data(subtable_data, session=session)
-        """
-        session = self.tutorial_operate.create_external_session()
-        try:
-            async with session.begin():
-                yield session
-        finally:
-            await session.close()
 
     def get_subtable_model_from_main_model(self) -> type:
         """
@@ -111,7 +89,7 @@ class APITutorialOperator:
         if not data:
             return []
 
-        async with self.transaction() as session:
+        async with self.tutorial_operate.transaction() as session:
             result_tutorials = []
             
             # Create tutorials first
@@ -136,8 +114,8 @@ class APITutorialOperator:
                     )
 
                     # Convert to APISubtable objects (create_data returns Pydantic models)
-                    SubtableClass = self.get_subtable_model_from_main_model()
-                    created_subtables = [SubtableClass(**sub.model_dump()) for sub in created_subtables_raw]
+                    subtable_class = self.get_subtable_model_from_main_model()
+                    created_subtables = [subtable_class(**sub.model_dump()) for sub in created_subtables_raw]
 
                 # Build result with nested structure (create_data returns Pydantic models)
                 tutorial_with_subtables = self.main_schemas(
@@ -242,7 +220,7 @@ class APITutorialOperator:
         if not update_data:
             return []
 
-        async with self.transaction() as session:
+        async with self.tutorial_operate.transaction() as session:
             # Process tutorial updates
             tutorial_update_list = []
             tutorial_ids = []
@@ -256,7 +234,7 @@ class APITutorialOperator:
                 tutorial_ids.append(where_value)
 
                 # Build tutorial update data dict, including where_field but excluding None values
-                update_fields = _extract_object_fields(
+                update_fields = extract_object_fields(
                     obj=update_item,
                     exclude_fields=[],  # 不排除任何字段
                     exclude_none=True   # 排除 None 值
@@ -300,7 +278,7 @@ class APITutorialOperator:
         if not tutorial_ids:
             return []
 
-        async with self.transaction() as session:
+        async with self.tutorial_operate.transaction() as session:
             # First, delete all subtables associated with these tutorials within transaction
             await self.subtable_operate.delete_filter_data(
                 filters={"tutorial_id": tutorial_ids}, session=session

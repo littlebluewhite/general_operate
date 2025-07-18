@@ -7,9 +7,9 @@ project_root = Path(__file__).parent.parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from general_operate import GeneralOperate
+from general_operate.general_operate import GeneralOperate
 from general_operate.utils.build_data import build_create_data, extract_object_fields
-from tutorial.schemas import subtable, tutorial
+from ...schemas import subtable, tutorial
 
 
 # Create specific operator classes that implement get_module

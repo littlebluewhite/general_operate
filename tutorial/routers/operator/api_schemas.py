@@ -39,8 +39,8 @@ class APITutorialBasic(BaseModel):
     tags: list[str] = Field(default_factory=list, description="List of tags for categorization")
     enable: bool = Field(default=True, description="Whether the tutorial is enabled")
 
-    @field_validator('tags')
     @classmethod
+    @field_validator('tags')
     def validate_tags(cls, v):
         if not isinstance(v, list):
             raise ValueError('Tags must be a list')
@@ -104,8 +104,8 @@ class APITutorialUpdate(BaseModel):
     enable: bool | None = Field(None, description="Updated enable status")
     subtables: list[APISubtableUpdate] | None = Field(None, description="Updated subtables list")
 
-    @field_validator('tags')
     @classmethod
+    @field_validator('tags')
     def validate_tags(cls, v):
         if v is None:
             return v

@@ -3,6 +3,7 @@ import functools
 import json
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime, UTC, timedelta
 from typing import Any, Generic, TypeVar
 from contextlib import asynccontextmanager
 
@@ -811,3 +812,15 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             # Generic exception handling for delete_filter_data - return empty list
             self.logger.error(f"Error in delete_filter_data: {type(e).__name__}: {str(e)}")
             return []
+
+    async def store_registration_otp(self, token: str, email: str, otp: str,
+                                     registration_data: dict, expires_after_minutes: int = 10) -> None:
+        data = {
+            "email": email,
+            "otp_code": otp,
+            "registration_data": registration_data,
+            "attempts": 0,
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=expires_after_minutes)).isoformat()
+        }
+        await self.redis.setex(f"registration_otp:{token}", expires_after_minutes+1, json.dumps(data))
+

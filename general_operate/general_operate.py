@@ -813,14 +813,13 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             self.logger.error(f"Error in delete_filter_data: {type(e).__name__}: {str(e)}")
             return []
 
-    async def store_registration_otp(self, token: str, email: str, otp: str,
-                                     registration_data: dict, expires_after_minutes: int = 10) -> None:
+    async def store_otp(self,name: str, token: str, otp: str,
+                                     custom_data: dict, expires_after_minutes: int = 10) -> None:
         data = {
-            "email": email,
             "otp_code": otp,
-            "registration_data": registration_data,
             "attempts": 0,
             "expires_at": (datetime.now(UTC) + timedelta(minutes=expires_after_minutes)).isoformat()
         }
-        await self.redis.setex(f"registration_otp:{token}", expires_after_minutes+1, json.dumps(data))
+        data.update(custom_data)
+        await self.redis.setex(f"{name}:{token}", expires_after_minutes+1, json.dumps(data))
 

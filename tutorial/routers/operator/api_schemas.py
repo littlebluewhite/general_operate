@@ -39,8 +39,8 @@ class APITutorialBasic(BaseModel):
     tags: list[str] = Field(default_factory=list, description="List of tags for categorization")
     enable: bool = Field(default=True, description="Whether the tutorial is enabled")
 
-    @classmethod
     @field_validator('tags')
+    @classmethod
     def validate_tags(cls, v):
         if not isinstance(v, list):
             raise ValueError('Tags must be a list')

@@ -18,7 +18,7 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop]:
 
 
 @pytest.fixture
-async def mock_db() -> AsyncMock:
+def mock_db() -> AsyncMock:
     """Mock database client for testing."""
     db = AsyncMock()
     db.engine_type = "postgresql"  # Default to PostgreSQL for testing
@@ -27,14 +27,14 @@ async def mock_db() -> AsyncMock:
 
 
 @pytest.fixture
-async def mock_redis() -> AsyncMock:
+def mock_redis() -> AsyncMock:
     """Mock Redis client for testing."""
     redis_client = AsyncMock(spec=redis.Redis)
     return redis_client
 
 
 @pytest.fixture
-async def mock_influxdb() -> AsyncMock:
+def mock_influxdb() -> AsyncMock:
     """Mock InfluxDB client for testing."""
     influx_client = AsyncMock()
     influx_client.bucket = "test_bucket"

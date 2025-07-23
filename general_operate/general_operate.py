@@ -32,8 +32,8 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
 
     def __init__(
         self,
-        database_client,
-        redis_client: redis.asyncio.Redis,
+        database_client = None,
+        redis_client: redis.asyncio.Redis = None,
         influxdb: InfluxDB = None,
         exc=GeneralOperateException,
     ):
@@ -231,11 +231,11 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             cache_data_to_set = {}
             for sql_row in batch_results:
                 if sql_row and "id" in sql_row:
-                    cache_data_to_set[str(sql_row["id"])] = json.dumps(sql_row)
+                    cache_data_to_set[str(sql_row["id"])] = sql_row
 
             # Batch write to cache
             if cache_data_to_set:
-                await self.set_cache(self.table_name, cache_data_to_set)
+                await self.store_caches(self.table_name, cache_data_to_set)
                 total_loaded += len(cache_data_to_set)
 
             # Check if we've reached the limit
@@ -291,7 +291,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                         continue
 
                     # Try to get actual data from cache
-                    cached_data = await self.get(self.table_name, {str(id_key)})
+                    cached_data = await self.get_caches(self.table_name, {str(id_key)})
                     if cached_data:
                         # Parse cached data and convert to schema
                         for cache_item in cached_data:
@@ -338,7 +338,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                                 # Prepare for cache storage (only if cache is working)
                                 if sql_row["id"] not in failed_cache_ops:
                                     found_ids.add(sql_row["id"])
-                                    cache_data_to_set[str(sql_row["id"])] = json.dumps(sql_row, default=str)
+                                    cache_data_to_set[str(sql_row["id"])] = sql_row
                             except Exception as schema_err:
                                 self.logger.error(f"Schema validation failed for SQL result {sql_row.get('id', 'unknown')}: {schema_err}")
                                 continue
@@ -346,7 +346,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                     # 3. Cache the found data (with error resilience)
                     if cache_data_to_set:
                         try:
-                            cache_success = await self.set_cache(self.table_name, cache_data_to_set)
+                            cache_success = await self.store_caches(self.table_name, cache_data_to_set)
                             if not cache_success:
                                 self.logger.warning(f"Cache write failed for {len(cache_data_to_set)} items in {operation_context}")
                         except Exception as cache_err:
@@ -581,7 +581,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         # 1. Pre-update cache cleanup (best effort)
         if cache_keys_to_delete:
             try:
-                deleted_count = await CacheOperate.delete_cache(self, self.table_name, set(cache_keys_to_delete))
+                deleted_count = await CacheOperate.delete_caches(self, self.table_name, set(cache_keys_to_delete))
                 self.logger.debug(f"Pre-update cache cleanup: deleted {deleted_count} entries")
 
                 # Also delete null markers if they exist (only for id-based updates)
@@ -619,7 +619,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         # 3. Post-update cache cleanup (ensure consistency)
         if cache_keys_to_delete:
             try:
-                deleted_count = await CacheOperate.delete_cache(self, self.table_name, set(cache_keys_to_delete))
+                deleted_count = await CacheOperate.delete_caches(self, self.table_name, set(cache_keys_to_delete))
                 self.logger.debug(f"Post-update cache cleanup: deleted {deleted_count} entries")
             except Exception as cache_err:
                 cache_delete_errors.append(f"post-update cleanup: {cache_err}")
@@ -743,7 +743,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 cache_keys = {
                     str(record_id) for record_id in successfully_deleted_ids
                 }
-                await CacheOperate.delete_cache(self, self.table_name, cache_keys)
+                await CacheOperate.delete_caches(self, self.table_name, cache_keys)
             except (redis.RedisError, AttributeError) as e:
                 # Cache delete failed, but SQL delete succeeded - log but don't fail
                 self.logger.warning(f"Cache cleanup failed in delete_data: {type(e).__name__}: {str(e)}")
@@ -782,7 +782,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 try:
                     # Delete cache entries for specific IDs
                     cache_keys = {str(record_id) for record_id in deleted_ids}
-                    await self.delete_cache(self.table_name, cache_keys)
+                    await self.delete_caches(self.table_name, cache_keys)
 
                     # Delete null markers for deleted IDs
                     for record_id in deleted_ids:
@@ -841,80 +841,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         )
 
     async def get_cache_data(self, prefix: str, identifier: str) -> dict[str, Any] | None:
-        """從 Redis 獲取資料"""
-
-        key = f"{prefix}:{identifier}"
-
-        try:
-            serialized_data = await self.redis.get(key)
-
-            if serialized_data is None:
-                return None
-
-            # 反序列化資料
-            data = json.loads(serialized_data)
-
-            self.logger.debug(
-                "Data retrieved from Redis",
-                key=key,
-                prefix=prefix
-            )
-
-            return data
-
-        except (json.JSONDecodeError, Exception) as e:
-            self.logger.error(
-                "Failed to retrieve data from Redis",
-                key=key,
-                error=str(e)
-            )
-            return None
+        """Get data from Redis cache"""
+        return await self.get_cache(prefix, identifier)
 
     async def delete_cache_data(self, prefix: str, identifier: str) -> bool:
-        """從 Redis 刪除資料"""
-
-        key = f"{prefix}:{identifier}"
-        result = await self.redis.delete(key)
-
-        self.logger.debug(
-            "Data deleted from Redis",
-            key=key,
-            prefix=prefix,
-            deleted=result > 0
-        )
-
-        return result > 0
-
-    async def cache_exists(self, prefix: str, identifier: str) -> bool:
-        """檢查資料是否存在"""
-        key = f"{prefix}:{identifier}"
-        return await self.redis.exists(key) > 0
-
-    async def cache_extend_ttl(
-            self,
-            prefix: str,
-            identifier: str,
-            additional_seconds: int
-    ) -> bool:
-        """延長資料過期時間"""
-
-        key = f"{prefix}:{identifier}"
-
-        # 獲取當前 TTL
-        current_ttl = await self.redis.ttl(key)
-
-        if current_ttl <= 0:
-            return False  # Key 不存在或已過期
-
-        # 設置新的 TTL
-        new_ttl = current_ttl + additional_seconds
-        result = await self.redis.expire(key, new_ttl)
-
-        self.logger.debug(
-            "TTL extended",
-            key=key,
-            previous_ttl=current_ttl,
-            new_ttl=new_ttl
-        )
-
-        return result
+        """Delete data from Redis cache"""
+        return await self.delete_cache(prefix, identifier)

@@ -1,10 +1,10 @@
 import json
-from enum import Enum
+import random
+from datetime import datetime, UTC
 from typing import Any
 import structlog
 
 import redis
-from fastapi.encoders import jsonable_encoder
 from redis import RedisError
 
 from ..utils.exception import GeneralOperateException
@@ -15,106 +15,167 @@ class CacheOperate:
         self.redis = redis_db
         self.__exc = exc
 
-    async def get(self, table_name: str, keys: set) -> list:
-        """Get multiple field values from a Redis hash"""
-        if not keys:
-            return []
+        self.logger = structlog.get_logger().bind(
+            operator=self.__class__.__name__
+        )
 
-        # Convert set to list for Redis operation
-        keys_list = list(keys)
+    async def get_caches(self, prefix: str, identifiers: set[str]) -> list[dict[str, Any]]:
+        keys = [f"{prefix}:{identifier}" for identifier in identifiers]
 
-        # Use HMGET to get multiple fields at once
-        values = await self.redis.hmget(table_name, keys_list)
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for key in keys:
+                # no await
+                pipe.get(key)
+            values = await pipe.execute()
 
-        # Build result list with key-value pairs
         result = []
-        for key, value in zip(keys_list, values, strict=False):
-            if value is not None:
-                # Try to parse JSON if possible
+        for identifier, raw in zip(identifiers, values):
+            if raw:
                 try:
-                    parsed_value = json.loads(value)
-                except (json.JSONDecodeError, TypeError):
-                    parsed_value = value
-                result.append({key: parsed_value})
-
+                    result.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    self.logger.warning(f"Invalid JSON in cache for {prefix}:{identifier}")
         return result
 
-    async def set_cache(self, table_name: str, data: dict) -> bool:
-        """Set multiple field-value pairs in a Redis hash"""
-        if not data:
+    async def get_cache(self, prefix: str, identifier: str) -> dict[str, Any] | None:
+        """從 Redis 獲取資料"""
+        key = f"{prefix}:{identifier}"
+
+        try:
+            serialized_data = await self.redis.get(key)
+
+            if serialized_data is None:
+                return None
+
+            # 反序列化資料
+            data = json.loads(serialized_data)
+
+            self.logger.debug(
+                "Data retrieved from Redis",
+                key=key,
+                prefix=prefix
+            )
+            return data
+
+        except (json.JSONDecodeError, Exception) as e:
+            self.logger.error(
+                "Failed to retrieve data from Redis",
+                key=key,
+                error=str(e)
+            )
+            return None
+
+    async def store_caches(self, prefix: str,
+                           identifier_key_with_data: dict[str, Any], ttl_seconds: int | None = None) -> bool:
+        if not identifier_key_with_data:
             return False
+            
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for identifier, data in identifier_key_with_data.items():
+                key, set_ttl, serialized_data = await self.__store_cache_inner(
+                    prefix, identifier, data, ttl_seconds
+                )
+                # no await
+                pipe.setex(key, set_ttl, serialized_data)
+            await pipe.execute()
+        return True
 
-        # Prepare data for Redis HSET
-        # Convert values to JSON strings if they're not already strings
-        redis_data = {}
-        for key, value in data.items():
-            if isinstance(value, (dict, list)):
-                redis_data[key] = json.dumps(value)
-            elif isinstance(value, Enum):
-                redis_data[key] = jsonable_encoder(value)
-            else:
-                redis_data[key] = str(value)
+    async def store_cache(
+            self, prefix: str, identifier: str, data: dict[str, Any], ttl_seconds: int | None = None
+    ) -> None:
+        """儲存資料到 Redis"""
 
-        # Use HSET to set multiple fields at once
-        result = await self.redis.hset(table_name, mapping=redis_data)
+        key, set_ttl, serialized_data = await self.__store_cache_inner(
+            prefix, identifier, data, ttl_seconds
+        )
+        await self.redis.setex(key, set_ttl, serialized_data)
 
-        # Return True if at least one field was set
-        return result >= 0
+        self.logger.debug(
+            "Data stored in Redis",
+            key=key,
+            prefix=prefix,
+            ttl_seconds=ttl_seconds
+        )
 
-    async def delete_cache(self, table_name: str, keys: set) -> int:
-        """Delete multiple fields from a Redis hash"""
-        if not keys:
+    @staticmethod
+    async def __store_cache_inner(
+            prefix: str, identifier: str, data: dict[str, Any], ttl_seconds: int | None = None
+    ) -> tuple[str, int, str]:
+        key = f"{prefix}:{identifier}"
+        # 添加元數據
+        enriched_data = {
+            **data,
+            "_created_at": datetime.now(UTC).isoformat(),
+            "prefix": prefix,
+            "_identifier": identifier
+        }
+        # 序列化資料
+        serialized_data = json.dumps(enriched_data, ensure_ascii=False)
+        # 儲存到 Redis
+        set_ttl = ttl_seconds if ttl_seconds else random.randint(2000, 5000)
+        return (key, set_ttl, serialized_data)
+
+    async def delete_caches(self, prefix: str, identifiers: set[str]) -> int:
+        if not identifiers:
             return 0
+        keys = [f"{prefix}:{identifier}" for identifier in identifiers]
+        deleted_count = await self.redis.delete(*keys)
 
-        # Convert set to list for Redis operation
-        keys_list = list(keys)
+        self.logger.debug(
+            "Batch delete from Redis",
+            keys=keys,
+            deleted_count=deleted_count
+        )
 
-        # Use HDEL to delete multiple fields at once
-        deleted_count = await self.redis.hdel(table_name, *keys_list)
-
-        # Return the number of fields deleted
         return deleted_count
 
-    async def exists(self, table_name: str, key: str) -> bool:
-        """Check if a field exists in a Redis hash"""
-        result = await self.redis.hexists(table_name, key)
-        return bool(result)
+    async def delete_cache(self, prefix: str, identifier: str) -> bool:
+        """從 Redis 刪除資料"""
+        key = f"{prefix}:{identifier}"
+        result = await self.redis.delete(key)
 
-    async def get_all(self, table_name: str) -> dict[str, Any]:
-        """Get all field-value pairs from a Redis hash"""
-        result = await self.redis.hgetall(table_name)
+        self.logger.debug(
+            "Data deleted from Redis",
+            key=key,
+            prefix=prefix,
+            deleted=result > 0
+        )
 
-        # Process the result to parse JSON values
-        processed_result = {}
-        for key, value in result.items():
-            if value is not None:
-                try:
-                    # Try to parse JSON
-                    processed_result[key] = json.loads(value)
-                except (json.JSONDecodeError, TypeError):
-                    # Keep original value if not JSON
-                    processed_result[key] = value
+        return result > 0
 
-        return processed_result
+    async def cache_exists(self, prefix: str, identifier: str) -> bool:
+        """檢查資料是否存在"""
+        key = f"{prefix}:{identifier}"
+        return await self.redis.exists(key) > 0
 
-    async def count_cache(self, table_name: str) -> int:
-        """Get the number of fields in a Redis hash"""
-        count = await self.redis.hlen(table_name)
-        return count
 
-    async def delete_keys(self, keys: list[str] | set[str]) -> int:
-        """Delete standalone Redis keys (not hash fields)"""
-        if not keys:
-            return 0
+    async def cache_extend_ttl(
+            self,
+            prefix: str,
+            identifier: str,
+            additional_seconds: int
+    ) -> bool:
+        """延長資料過期時間"""
 
-        # Convert to list if needed
-        keys_list = list(keys) if isinstance(keys, set) else keys
+        key = f"{prefix}:{identifier}"
 
-        # Use DEL to delete standalone keys
-        deleted_count = await self.redis.delete(*keys_list)
+        # 獲取當前 TTL
+        current_ttl = await self.redis.ttl(key)
 
-        # Return the number of keys deleted
-        return deleted_count
+        if current_ttl <= 0:
+            return False  # Key 不存在或已過期
+
+        # 設置新的 TTL
+        new_ttl = current_ttl + additional_seconds
+        result = await self.redis.expire(key, new_ttl)
+
+        self.logger.debug(
+            "TTL extended",
+            key=key,
+            previous_ttl=current_ttl,
+            new_ttl=new_ttl
+        )
+        return result
 
     async def set_null_key(self, key: str, expiry_seconds: int = 300) -> bool:
         """Set a null marker key with expiry"""

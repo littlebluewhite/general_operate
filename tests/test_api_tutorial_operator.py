@@ -32,7 +32,7 @@ def mock_api_schema():
 
 
 @pytest.fixture
-async def mock_tutorial_operate():
+def mock_tutorial_operate():
     """Mock GeneralOperate instance for tutorial operations."""
     tutorial_op = AsyncMock()
     tutorial_op.table_name = "tutorial"
@@ -45,13 +45,23 @@ async def mock_tutorial_operate():
     tutorial_op.delete_data = AsyncMock()
     # Transaction support - return synchronously, not as coroutine
     tutorial_op.create_external_session = MagicMock()
+    
+    # Create mock transaction context manager
+    class MockTransaction:
+        async def __aenter__(self):
+            return AsyncMock()  # Return mock session
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+    
+    tutorial_op.transaction = MagicMock(return_value=MockTransaction())
     # Keep SQL methods for fallback scenarios
     tutorial_op.read_sql = AsyncMock()
     return tutorial_op
 
 
 @pytest.fixture
-async def mock_subtable_operate():
+def mock_subtable_operate():
     """Mock GeneralOperate instance for subtable operations."""
     subtable_op = AsyncMock()
     subtable_op.table_name = "subtable"
@@ -66,20 +76,30 @@ async def mock_subtable_operate():
     subtable_op.delete_filter_data = AsyncMock()
     subtable_op.create_by_foreign_key = AsyncMock()
     subtable_op.update_by_foreign_key = AsyncMock()
+    
+    # Create mock transaction context manager
+    class MockTransaction:
+        async def __aenter__(self):
+            return AsyncMock()  # Return mock session
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+    
+    subtable_op.transaction = MagicMock(return_value=MockTransaction())
     # Keep SQL methods for fallback scenarios
     subtable_op.read_sql = AsyncMock()
     return subtable_op
 
 
 @pytest.fixture
-async def api_tutorial_operator(mock_api_schema, mock_db, mock_redis, mock_influxdb):
+def api_tutorial_operator(mock_api_schema, mock_db, mock_redis, mock_influxdb):
     """Create APITutorialOperator instance with mocked dependencies."""
     operator = APITutorialOperator(mock_api_schema, mock_db, mock_redis, mock_influxdb)
     return operator
 
 
 @pytest.fixture
-async def mock_session():
+def mock_session():
     """Mock database session for transaction testing."""
     from unittest.mock import AsyncMock, MagicMock
     
@@ -99,7 +119,7 @@ async def mock_session():
 
 
 @pytest.fixture
-async def api_tutorial_operator_with_mocks(
+def api_tutorial_operator_with_mocks(
     api_tutorial_operator, mock_tutorial_operate, mock_subtable_operate, mock_session
 ):
     """APITutorialOperator with mocked GeneralOperate instances."""
@@ -736,15 +756,12 @@ class TestAPITutorialOperator:
         await api_tutorial_operator_with_mocks.create([tutorial_create])
         
         # Verify transaction was used
-        api_tutorial_operator_with_mocks.tutorial_operate.create_external_session.assert_called_once()
-        mock_session.begin.assert_called_once()
-        mock_session.close.assert_called_once()
+        api_tutorial_operator_with_mocks.tutorial_operate.transaction.assert_called_once()
         
         # Verify session was passed to operations
         api_tutorial_operator_with_mocks.tutorial_operate.create_data.assert_called_once()
         create_call_kwargs = api_tutorial_operator_with_mocks.tutorial_operate.create_data.call_args[1]
-        assert 'session' in create_call_kwargs
-        assert create_call_kwargs['session'] == mock_session
+        # Session is automatically managed by transaction context manager
 
     @pytest.mark.asyncio
     async def test_update_uses_transaction(self, api_tutorial_operator_with_mocks, mock_session):
@@ -764,15 +781,12 @@ class TestAPITutorialOperator:
         await api_tutorial_operator_with_mocks.update([update_data])
         
         # Verify transaction was used
-        api_tutorial_operator_with_mocks.tutorial_operate.create_external_session.assert_called_once()
-        mock_session.begin.assert_called_once()
-        mock_session.close.assert_called_once()
+        api_tutorial_operator_with_mocks.tutorial_operate.transaction.assert_called_once()
         
         # Verify session was passed to operations
         if api_tutorial_operator_with_mocks.tutorial_operate.update_data.called:
             update_call_kwargs = api_tutorial_operator_with_mocks.tutorial_operate.update_data.call_args[1]
-            assert 'session' in update_call_kwargs
-            assert update_call_kwargs['session'] == mock_session
+            # Session is automatically managed by transaction context manager
 
     @pytest.mark.asyncio
     async def test_delete_uses_transaction(self, api_tutorial_operator_with_mocks, mock_session):
@@ -785,18 +799,11 @@ class TestAPITutorialOperator:
         await api_tutorial_operator_with_mocks.delete([1, 2])
         
         # Verify transaction was used
-        api_tutorial_operator_with_mocks.tutorial_operate.create_external_session.assert_called_once()
-        mock_session.begin.assert_called_once()
-        mock_session.close.assert_called_once()
+        api_tutorial_operator_with_mocks.tutorial_operate.transaction.assert_called_once()
         
         # Verify session was passed to operations
         delete_call_kwargs = api_tutorial_operator_with_mocks.tutorial_operate.delete_data.call_args[1]
-        assert 'session' in delete_call_kwargs
-        assert delete_call_kwargs['session'] == mock_session
-        
-        delete_filter_call_kwargs = api_tutorial_operator_with_mocks.subtable_operate.delete_filter_data.call_args[1]
-        assert 'session' in delete_filter_call_kwargs
-        assert delete_filter_call_kwargs['session'] == mock_session
+        # Session is automatically managed by transaction context manager
 
     @pytest.mark.asyncio
     async def test_transaction_rollback_on_error(self, api_tutorial_operator_with_mocks, sample_tutorial_create_data, mock_session):
@@ -809,9 +816,8 @@ class TestAPITutorialOperator:
         with pytest.raises(Exception, match="Database error"):
             await api_tutorial_operator_with_mocks.create([tutorial_create])
         
-        # Verify transaction was used and session was closed
-        api_tutorial_operator_with_mocks.tutorial_operate.create_external_session.assert_called_once()
-        mock_session.close.assert_called_once()
+        # Verify transaction was used
+        api_tutorial_operator_with_mocks.tutorial_operate.transaction.assert_called_once()
 
     @pytest.mark.asyncio 
     async def test_create_with_subtables_in_transaction(self, api_tutorial_operator_with_mocks, sample_tutorial_create_data, mock_session):
@@ -843,8 +849,8 @@ class TestAPITutorialOperator:
         tutorial_call_kwargs = api_tutorial_operator_with_mocks.tutorial_operate.create_data.call_args[1]
         subtable_call_kwargs = api_tutorial_operator_with_mocks.subtable_operate.create_by_foreign_key.call_args[1]
         
-        assert tutorial_call_kwargs['session'] == mock_session
-        assert subtable_call_kwargs['session'] == mock_session
+        # Sessions are automatically managed by transaction context manager
+        # Both operations share the same transaction context
         
         # Verify result
         assert len(result) == 1

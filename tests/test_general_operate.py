@@ -80,9 +80,16 @@ def mock_redis_client():
     mock_redis.setex = AsyncMock()
     mock_redis.get = AsyncMock()
     mock_redis.delete = AsyncMock()
+    mock_redis.hdel = AsyncMock()
+    mock_redis.hset = AsyncMock()
+    mock_redis.hmget = AsyncMock()
+    mock_redis.hexists = AsyncMock()
+    mock_redis.hgetall = AsyncMock()
+    mock_redis.hlen = AsyncMock()
     mock_redis.exists = AsyncMock()
     mock_redis.ttl = AsyncMock()
     mock_redis.expire = AsyncMock()
+    mock_redis.ping = AsyncMock(return_value=True)
     return mock_redis
 
 
@@ -204,7 +211,7 @@ class TestGeneralOperateCacheOperations:
         """Test successful cache warming"""
         with (
             patch.object(general_operate, "read_sql", new_callable=AsyncMock) as mock_read,
-            patch.object(CacheOperate, "set_cache", new_callable=AsyncMock) as mock_set,
+            patch.object(CacheOperate, "store_cache", new_callable=AsyncMock) as mock_set,
         ):
             # Mock SQL read results
             mock_read.side_effect = [
@@ -283,7 +290,7 @@ class TestGeneralOperateReadData:
             }
         ]
 
-        with patch.object(CacheOperate, "get", new_callable=AsyncMock) as mock_get:
+        with patch.object(CacheOperate, "get_caches", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = cached_data
             general_operate.redis.exists = AsyncMock(
                 return_value=False
@@ -300,11 +307,11 @@ class TestGeneralOperateReadData:
     async def test_read_data_cache_miss_sql_hit(self, general_operate):
         """Test read_data with cache miss but SQL hit"""
         with (
-            patch.object(CacheOperate, "get", new_callable=AsyncMock) as mock_get,
+            patch.object(CacheOperate, "get_cache", new_callable=AsyncMock) as mock_get,
             patch.object(
                 SQLOperate, "read_one", new_callable=AsyncMock
             ) as mock_read_one,
-            patch.object(CacheOperate, "set_cache", new_callable=AsyncMock) as mock_set,
+            patch.object(CacheOperate, "store_cache", new_callable=AsyncMock) as mock_set,
         ):
             # Mock cache miss
             mock_get.return_value = []
@@ -335,7 +342,7 @@ class TestGeneralOperateReadData:
     async def test_read_data_cache_miss_sql_miss(self, general_operate):
         """Test read_data with both cache and SQL miss"""
         with (
-            patch.object(CacheOperate, "get", new_callable=AsyncMock) as mock_get,
+            patch.object(CacheOperate, "get_cache", new_callable=AsyncMock) as mock_get,
             patch.object(
                 SQLOperate, "read_one", new_callable=AsyncMock
             ) as mock_read_one,
@@ -370,7 +377,7 @@ class TestGeneralOperateReadData:
     async def test_read_data_fallback(self, general_operate):
         """Test read_data fallback strategy"""
         with (
-            patch.object(CacheOperate, "get") as mock_get,
+            patch.object(CacheOperate, "get_cache") as mock_get,
             patch.object(general_operate, "_fetch_from_sql") as mock_fetch,
         ):
             # Mock cache error
@@ -701,8 +708,8 @@ async def test_integration_workflow(general_operate):
     """Test complete workflow of GeneralOperate operations"""
     with (
         patch.object(general_operate, "create_external_session") as mock_session_ctx,
-        patch.object(CacheOperate, "get") as mock_get,
-        patch.object(CacheOperate, "set_cache") as mock_set,
+        patch.object(CacheOperate, "get_cache") as mock_get,
+        patch.object(CacheOperate, "store_cache") as mock_set,
     ):
         mock_session = AsyncMock()
         mock_session_ctx.return_value.__aenter__.return_value = mock_session

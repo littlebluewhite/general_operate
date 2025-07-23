@@ -1,16 +1,82 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from redis import RedisError
 
-from general_operate import GeneralOperateException
 from general_operate.app.cache_operate import CacheOperate
 
 
 @pytest.fixture
 def mock_redis():
     """Create a mock Redis client"""
-    return AsyncMock()
+    from unittest.mock import MagicMock
+    import redis.asyncio
+    
+    mock_redis = AsyncMock(spec=redis.asyncio.Redis)
+    
+    # Create mock pipeline context manager
+    class MockPipeline:
+        def __init__(self):
+            self.commands = []
+            self.execute = AsyncMock()
+            
+        def setex(self, key, ttl, value):
+            self.commands.append(('setex', key, ttl, value))
+            
+        def set(self, key, value):
+            self.commands.append(('set', key, value))
+            
+        def get(self, key):
+            self.commands.append(('get', key))
+            
+        async def _default_execute(self):
+            # Return mock values based on the commands
+            results = []
+            for cmd in self.commands:
+                if cmd[0] == 'get':
+                    # Mock get responses
+                    key = cmd[1]
+                    if 'field1' in key:
+                        results.append('{"string_field": "test_value", "number": 42}')
+                    elif 'field2' in key:
+                        results.append('{"dict_field": {"nested": "value"}, "list_field": [1, 2, 3]}')
+                    elif 'user1' in key:
+                        results.append('{"name": "John"}')
+                    elif 'age' in key:
+                        results.append('{"value": 25}')
+                    else:
+                        results.append(None)
+                else:
+                    results.append(True)
+            return results
+            
+        async def __aenter__(self):
+            return self
+            
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+    
+    # Set up pipeline method
+    pipeline_instance = MockPipeline()
+    pipeline_instance.execute.side_effect = pipeline_instance._default_execute
+    mock_redis.pipeline = MagicMock(return_value=pipeline_instance)
+    
+    # Set up other methods with proper return values
+    mock_redis.exists = AsyncMock(return_value=1)
+    mock_redis.delete = AsyncMock(return_value=1)
+    mock_redis.hdel = AsyncMock(return_value=1)
+    mock_redis.hexists = AsyncMock(return_value=1)
+    mock_redis.hset = AsyncMock(return_value=1)
+    mock_redis.hmget = AsyncMock(return_value=[])
+    mock_redis.hgetall = AsyncMock(return_value={})
+    mock_redis.hlen = AsyncMock(return_value=0)
+    mock_redis.setex = AsyncMock()
+    mock_redis.get = AsyncMock()
+    mock_redis.ttl = AsyncMock(return_value=3600)
+    mock_redis.expire = AsyncMock(return_value=True)
+    mock_redis.ping = AsyncMock(return_value=True)
+    
+    return mock_redis
 
 
 @pytest.fixture
@@ -25,129 +91,89 @@ class TestRedisOperate:
     @pytest.mark.asyncio
     async def test_get_with_empty_keys(self, redis_operate):
         """Test get method with empty keys"""
-        result = await redis_operate.get("test_table", set())
+        result = await redis_operate.get_caches("test_table", set())
         assert result == []
 
     @pytest.mark.asyncio
     async def test_get_with_valid_keys(self, redis_operate, mock_redis):
         """Test get method with valid keys"""
-        mock_redis.hmget.return_value = ["value1", '{"key": "value2"}', None]
+        # Pipeline will be used for get operations
+        result = await redis_operate.get_caches("test_table", {"field1", "field2", "field3"})
 
-        result = await redis_operate.get("test_table", {"field1", "field2", "field3"})
+        # Check that pipeline was called
+        mock_redis.pipeline.assert_called_once_with(transaction=False)
 
-        # Check that hmget was called correctly
-        mock_redis.hmget.assert_called_once()
-
-        # Check results - note that order might vary due to set
+        # Check results - should get field1 and field2 (field3 returns None)
         assert len(result) == 2
-        values = [list(item.values())[0] for item in result]
-        assert "value1" in values
-        assert {"key": "value2"} in values
+        # Verify the returned data structure
+        assert any("string_field" in item for item in result)
+        assert any("dict_field" in item for item in result)
 
     @pytest.mark.asyncio
     async def test_set_with_empty_data(self, redis_operate):
         """Test set method with empty data"""
-        result = await redis_operate.set_cache("test_table", {})
+        result = await redis_operate.store_caches("test_table", {})
         assert result is False
 
     @pytest.mark.asyncio
     async def test_set_with_various_data_types(self, redis_operate, mock_redis):
         """Test set method with different data types"""
-        mock_redis.hset.return_value = 3
 
         test_data = {
-            "string_field": "test_value",
-            "dict_field": {"nested": "value"},
-            "list_field": [1, 2, 3],
-            "number_field": 42,
+            "field1": {"string_field": "test_value", "number": 42},
+            "field2": {"dict_field": {"nested": "value"}, "list_field": [1, 2, 3]}
         }
 
-        result = await redis_operate.set_cache("test_table", test_data)
+        result = await redis_operate.store_caches("test_table", test_data, ttl_seconds=3600)
 
-        # Verify hset was called
-        mock_redis.hset.assert_called_once()
-        call_args = mock_redis.hset.call_args
-
-        # Check the mapping argument
-        mapping = call_args.kwargs["mapping"]
-        assert mapping["string_field"] == "test_value"
-        assert mapping["dict_field"] == '{"nested": "value"}'
-        assert mapping["list_field"] == "[1, 2, 3]"
-        assert mapping["number_field"] == "42"
+        # Verify pipeline was used
+        mock_redis.pipeline.assert_called_once_with(transaction=False)
+        
+        # Verify setex was called twice (once for each field) 
+        pipeline_mock = mock_redis.pipeline.return_value
+        assert len([cmd for cmd in pipeline_mock.commands if cmd[0] == 'setex']) == 2
+        
+        # Verify execute was called
+        pipeline_mock.execute.assert_called_once()
 
         assert result is True
 
     @pytest.mark.asyncio
     async def test_delete_with_empty_keys(self, redis_operate):
         """Test delete method with empty keys"""
-        result = await redis_operate.delete_cache("test_table", set())
+        result = await redis_operate.delete_caches("test_table", set())
         assert result == 0
 
     @pytest.mark.asyncio
     async def test_delete_with_valid_keys(self, redis_operate, mock_redis):
         """Test delete method with valid keys"""
-        mock_redis.hdel.return_value = 2
+        mock_redis.delete.return_value = 2
 
-        result = await redis_operate.delete_cache("test_table", {"field1", "field2"})
+        result = await redis_operate.delete_caches("test_table", {"field1", "field2"})
 
-        # Verify hdel was called correctly
-        mock_redis.hdel.assert_called_once()
+        # Verify delete was called correctly
+        mock_redis.delete.assert_called_once()
         assert result == 2
 
     @pytest.mark.asyncio
     async def test_exists_field_exists(self, redis_operate, mock_redis):
         """Test exists method when field exists"""
-        mock_redis.hexists.return_value = 1
+        mock_redis.exists.return_value = 1
 
-        result = await redis_operate.exists("test_table", "field1")
+        result = await redis_operate.cache_exists("test_table", "field1")
 
-        mock_redis.hexists.assert_called_once_with("test_table", "field1")
+        mock_redis.exists.assert_called_once_with("test_table:field1")
         assert result is True
 
     @pytest.mark.asyncio
     async def test_exists_field_not_exists(self, redis_operate, mock_redis):
         """Test exists method when field doesn't exist"""
-        mock_redis.hexists.return_value = 0
+        mock_redis.exists.return_value = 0
 
-        result = await redis_operate.exists("test_table", "field1")
+        result = await redis_operate.cache_exists("test_table", "field1")
 
+        mock_redis.exists.assert_called_once_with("test_table:field1")
         assert result is False
-
-    @pytest.mark.asyncio
-    async def test_get_all_empty_hash(self, redis_operate, mock_redis):
-        """Test get_all method with empty hash"""
-        mock_redis.hgetall.return_value = {}
-
-        result = await redis_operate.get_all("test_table")
-
-        assert result == {}
-
-    @pytest.mark.asyncio
-    async def test_get_all_with_mixed_values(self, redis_operate, mock_redis):
-        """Test get_all method with mixed value types"""
-        mock_redis.hgetall.return_value = {
-            "field1": "simple_string",
-            "field2": '{"nested": "json"}',
-            "field3": "[1, 2, 3]",
-            "field4": None,
-        }
-
-        result = await redis_operate.get_all("test_table")
-
-        assert result["field1"] == "simple_string"
-        assert result["field2"] == {"nested": "json"}
-        assert result["field3"] == [1, 2, 3]
-        assert "field4" not in result
-
-    @pytest.mark.asyncio
-    async def test_count(self, redis_operate, mock_redis):
-        """Test count method"""
-        mock_redis.hlen.return_value = 5
-
-        result = await redis_operate.count_cache("test_table")
-
-        mock_redis.hlen.assert_called_once_with("test_table")
-        assert result == 5
 
     @pytest.mark.asyncio
     async def test_health_check_success(self, redis_operate, mock_redis):
@@ -170,57 +196,89 @@ class TestRedisOperate:
     @pytest.mark.asyncio
     async def test_exception_handler_json_decode_error(self, redis_operate, mock_redis):
         """Test exception handler with JSON decode error"""
-        # Mock a method that would trigger JSON decode error
-        mock_redis.hmget.return_value = ["invalid json"]
+        # Create a custom pipeline that returns invalid JSON
+        class InvalidJSONPipeline:
+            def __init__(self):
+                self.commands = []
+                
+            def get(self, key):
+                self.commands.append(('get', key))
+                
+            async def execute(self):
+                return ["invalid json"]  # This will cause JSONDecodeError
+                
+            async def __aenter__(self):
+                return self
+                
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                return None
+        
+        mock_redis.pipeline = MagicMock(return_value=InvalidJSONPipeline())
 
-        # Patch json.loads to raise JSONDecodeError
-        import json
-
-        original_loads = json.loads
-
-        def mock_loads(s):
-            if s == "invalid json":
-                raise json.JSONDecodeError("Test error", "", 0)
-            return original_loads(s)
-
-        json.loads = mock_loads
-
-        try:
-            # The get method handles invalid JSON gracefully by keeping it as string
-            # So this test doesn't actually trigger JSONDecodeError anymore
-            result = await redis_operate.get("test_table", {"field1"})
-            # Verify it kept the invalid JSON as string
-            assert len(result) == 1
-            assert list(result[0].values())[0] == "invalid json"
-        finally:
-            json.loads = original_loads
+        # The get method handles invalid JSON gracefully by logging warning and continuing
+        result = await redis_operate.get_caches("test_table", {"field1"})
+        # Should return empty list as invalid JSON is skipped
+        assert result == []
 
 
 @pytest.mark.asyncio
 async def test_integration_workflow(redis_operate, mock_redis):
     """Test a complete workflow of operations"""
-    # Setup mock responses
-    mock_redis.hset.return_value = 2
-    mock_redis.hexists.return_value = 1
-    mock_redis.hmget.return_value = ['{"name": "John"}', "25"]
-    mock_redis.hlen.return_value = 2
-    mock_redis.hdel.return_value = 1
+    # Setup mock responses for non-pipeline operations
+    mock_redis.exists.return_value = 1
+    mock_redis.delete.return_value = 1
+
+    # Create a fresh pipeline for each call to avoid state issues
+    def create_fresh_pipeline(transaction=False):
+        class FreshMockPipeline:
+            def __init__(self):
+                self.commands = []
+                
+            def setex(self, key, ttl, value):
+                self.commands.append(('setex', key, ttl, value))
+                
+            def set(self, key, value):
+                self.commands.append(('set', key, value))
+                
+            def get(self, key):
+                self.commands.append(('get', key))
+                
+            async def execute(self):
+                results = []
+                for cmd in self.commands:
+                    if cmd[0] == 'get':
+                        key = cmd[1]
+                        if 'user1' in key:
+                            results.append('{"name": "John"}')
+                        elif 'age' in key:
+                            results.append('{"value": 25}')
+                        else:
+                            results.append(None)
+                    else:
+                        results.append(True)
+                return results
+                
+            async def __aenter__(self):
+                return self
+                
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                return None
+        
+        return FreshMockPipeline()
+    
+    mock_redis.pipeline.side_effect = create_fresh_pipeline
 
     # 1. Set some data
-    data = {"user1": {"name": "John"}, "age": 25}
-    assert await redis_operate.set_cache("users", data) is True
+    data = {"user1": {"name": "John"}, "age": {"value": 25}}
+    assert await redis_operate.store_caches("users", data) is True
 
-    # 2. Check if field exists
-    assert await redis_operate.exists("users", "user1") is True
+    # 2. Check if field exists  
+    assert await redis_operate.cache_exists("users", "user1") is True
 
     # 3. Get specific fields
-    result = await redis_operate.get("users", {"user1", "age"})
+    result = await redis_operate.get_caches("users", {"user1", "age"})
     assert len(result) == 2
 
-    # 4. Count fields
-    count = await redis_operate.count_cache("users")
-    assert count == 2
-
-    # 5. Delete a field
-    deleted = await redis_operate.delete_cache("users", {"age"})
+    # 4. Delete a field
+    deleted = await redis_operate.delete_caches("users", {"age"})
     assert deleted == 1

@@ -3,7 +3,7 @@ import functools
 import json
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime, UTC, timedelta
+from datetime import datetime, UTC
 from typing import Any, Generic, TypeVar
 from contextlib import asynccontextmanager
 
@@ -813,13 +813,108 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             self.logger.error(f"Error in delete_filter_data: {type(e).__name__}: {str(e)}")
             return []
 
-    async def store_otp(self,name: str, token: str, otp: str,
-                                     custom_data: dict, expires_after_minutes: int = 10) -> None:
-        data = {
-            "otp_code": otp,
-            "attempts": 0,
-            "expires_at": (datetime.now(UTC) + timedelta(minutes=expires_after_minutes)).isoformat()
-        }
-        data.update(custom_data)
-        await self.redis.setex(f"{name}:{token}", expires_after_minutes+1, json.dumps(data))
+    async def store_cache_data(
+            self, prefix: str, identifier: str, data: dict[str, Any], ttl_seconds: int | None = None
+    ) -> None:
+        """儲存資料到 Redis"""
+        key = f"{prefix}:{identifier}"
 
+        # 添加元數據
+        enriched_data = {
+            **data,
+            "_created_at": datetime.now(UTC).isoformat(),
+            "prefix": prefix,
+            "_identifier": identifier
+        }
+
+        # 序列化資料
+        serialized_data = json.dumps(enriched_data, ensure_ascii=False)
+
+        # 儲存到 Redis
+        await self.redis.setex(key, ttl_seconds, serialized_data)
+
+        self.logger.debug(
+            "Data stored in Redis",
+            key=key,
+            prefix=prefix,
+            ttl_seconds=ttl_seconds
+        )
+
+    async def get_cache_data(self, prefix: str, identifier: str) -> dict[str, Any] | None:
+        """從 Redis 獲取資料"""
+
+        key = f"{prefix}:{identifier}"
+
+        try:
+            serialized_data = await self.redis.get(key)
+
+            if serialized_data is None:
+                return None
+
+            # 反序列化資料
+            data = json.loads(serialized_data)
+
+            self.logger.debug(
+                "Data retrieved from Redis",
+                key=key,
+                prefix=prefix
+            )
+
+            return data
+
+        except (json.JSONDecodeError, Exception) as e:
+            self.logger.error(
+                "Failed to retrieve data from Redis",
+                key=key,
+                error=str(e)
+            )
+            return None
+
+    async def delete_cache_data(self, prefix: str, identifier: str) -> bool:
+        """從 Redis 刪除資料"""
+
+        key = f"{prefix}:{identifier}"
+        result = await self.redis.delete(key)
+
+        self.logger.debug(
+            "Data deleted from Redis",
+            key=key,
+            prefix=prefix,
+            deleted=result > 0
+        )
+
+        return result > 0
+
+    async def cache_exists(self, prefix: str, identifier: str) -> bool:
+        """檢查資料是否存在"""
+        key = f"{prefix}:{identifier}"
+        return await self.redis.exists(key) > 0
+
+    async def cache_extend_ttl(
+            self,
+            prefix: str,
+            identifier: str,
+            additional_seconds: int
+    ) -> bool:
+        """延長資料過期時間"""
+
+        key = f"{prefix}:{identifier}"
+
+        # 獲取當前 TTL
+        current_ttl = await self.redis.ttl(key)
+
+        if current_ttl <= 0:
+            return False  # Key 不存在或已過期
+
+        # 設置新的 TTL
+        new_ttl = current_ttl + additional_seconds
+        result = await self.redis.expire(key, new_ttl)
+
+        self.logger.debug(
+            "TTL extended",
+            key=key,
+            previous_ttl=current_ttl,
+            new_ttl=new_ttl
+        )
+
+        return result

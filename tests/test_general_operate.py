@@ -75,7 +75,15 @@ def mock_database_client():
 @pytest.fixture
 def mock_redis_client():
     """Create a mock Redis client"""
-    return AsyncMock(spec=redis.asyncio.Redis)
+    mock_redis = AsyncMock(spec=redis.asyncio.Redis)
+    # Set up default async mock methods
+    mock_redis.setex = AsyncMock()
+    mock_redis.get = AsyncMock()
+    mock_redis.delete = AsyncMock()
+    mock_redis.exists = AsyncMock()
+    mock_redis.ttl = AsyncMock()
+    mock_redis.expire = AsyncMock()
+    return mock_redis
 
 
 @pytest.fixture
@@ -818,3 +826,417 @@ async def test_integration_workflow(general_operate):
         except GeneralOperateException as e:
             # Exception is acceptable in tests with mocks
             assert e.status_code == 500
+
+
+class TestGeneralOperateCacheData:
+    """Test cases for GeneralOperate cache data methods"""
+
+    @pytest.mark.asyncio
+    async def test_store_cache_data_success(self, general_operate):
+        """Test successful cache data storage"""
+        from datetime import datetime, timezone
+        
+        test_data = {"user_id": 123, "name": "John Doe", "status": "active"}
+        prefix = "user_cache"
+        identifier = "user123"
+        ttl_seconds = 3600
+        
+        # Mock current time for consistent testing
+        mock_datetime = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        
+        with patch('general_operate.general_operate.datetime') as mock_dt:
+            mock_dt.now.return_value = mock_datetime
+            
+            await general_operate.store_cache_data(prefix, identifier, test_data, ttl_seconds)
+            
+            # Verify Redis setex was called with correct parameters
+            expected_key = f"{prefix}:{identifier}"
+            general_operate.redis.setex.assert_called_once()
+            
+            call_args = general_operate.redis.setex.call_args
+            assert call_args[0][0] == expected_key  # key
+            assert call_args[0][1] == ttl_seconds   # ttl
+            
+            # Check serialized data
+            serialized_data = call_args[0][2]
+            deserialized = json.loads(serialized_data)
+            
+            assert deserialized["user_id"] == 123
+            assert deserialized["name"] == "John Doe"
+            assert deserialized["status"] == "active"
+            assert deserialized["_created_at"] == "2023-01-01T12:00:00+00:00"
+            assert deserialized["prefix"] == prefix
+            assert deserialized["_identifier"] == identifier
+
+    @pytest.mark.asyncio
+    async def test_store_cache_data_without_ttl(self, general_operate):
+        """Test cache data storage without TTL"""
+        test_data = {"key": "value"}
+        prefix = "test"
+        identifier = "item1"
+        
+        await general_operate.store_cache_data(prefix, identifier, test_data)
+        
+        # Verify setex was called with None TTL
+        call_args = general_operate.redis.setex.call_args
+        assert call_args[0][1] is None  # ttl should be None
+
+    @pytest.mark.asyncio
+    async def test_store_cache_data_empty_data(self, general_operate):
+        """Test cache data storage with empty data"""
+        test_data = {}
+        prefix = "test"
+        identifier = "empty"
+        
+        await general_operate.store_cache_data(prefix, identifier, test_data)
+        
+        # Should still work, just store empty data with metadata
+        general_operate.redis.setex.assert_called_once()
+        
+        call_args = general_operate.redis.setex.call_args
+        serialized_data = call_args[0][2]
+        deserialized = json.loads(serialized_data)
+        
+        assert deserialized["prefix"] == prefix
+        assert deserialized["_identifier"] == identifier
+        assert "_created_at" in deserialized
+
+    @pytest.mark.asyncio
+    async def test_store_cache_data_complex_data(self, general_operate):
+        """Test cache data storage with complex nested data"""
+        test_data = {
+            "nested": {"key": "value", "number": 42},
+            "list": [1, 2, 3],
+            "boolean": True,
+            "null_value": None
+        }
+        prefix = "complex"
+        identifier = "data1"
+        
+        await general_operate.store_cache_data(prefix, identifier, test_data)
+        
+        # Verify complex data is properly serialized
+        call_args = general_operate.redis.setex.call_args
+        serialized_data = call_args[0][2]
+        deserialized = json.loads(serialized_data)
+        
+        assert deserialized["nested"]["key"] == "value"
+        assert deserialized["nested"]["number"] == 42
+        assert deserialized["list"] == [1, 2, 3]
+        assert deserialized["boolean"] is True
+        assert deserialized["null_value"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_cache_data_success(self, general_operate):
+        """Test successful cache data retrieval"""
+        prefix = "user_cache"
+        identifier = "user123"
+        expected_key = f"{prefix}:{identifier}"
+        
+        # Mock Redis response
+        cached_data = {
+            "user_id": 123,
+            "name": "John Doe",
+            "_created_at": "2023-01-01T12:00:00+00:00",
+            "prefix": prefix,
+            "_identifier": identifier
+        }
+        general_operate.redis.get.return_value = json.dumps(cached_data)
+        
+        result = await general_operate.get_cache_data(prefix, identifier)
+        
+        # Verify Redis get was called with correct key
+        general_operate.redis.get.assert_called_once_with(expected_key)
+        
+        # Verify returned data
+        assert result is not None
+        assert result["user_id"] == 123
+        assert result["name"] == "John Doe"
+        assert result["_created_at"] == "2023-01-01T12:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_get_cache_data_not_found(self, general_operate):
+        """Test cache data retrieval when key doesn't exist"""
+        prefix = "user_cache"
+        identifier = "nonexistent"
+        
+        # Mock Redis returning None
+        general_operate.redis.get.return_value = None
+        
+        result = await general_operate.get_cache_data(prefix, identifier)
+        
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_cache_data_json_decode_error(self, general_operate):
+        """Test cache data retrieval with invalid JSON"""
+        prefix = "user_cache"
+        identifier = "corrupted"
+        
+        # Mock Redis returning invalid JSON
+        general_operate.redis.get.return_value = "invalid json data"
+        
+        result = await general_operate.get_cache_data(prefix, identifier)
+        
+        # Should return None and log error
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_cache_data_redis_error(self, general_operate):
+        """Test cache data retrieval with Redis error"""
+        prefix = "user_cache"
+        identifier = "error_case"
+        
+        # Mock Redis raising an exception
+        general_operate.redis.get.side_effect = redis.RedisError("Connection failed")
+        
+        result = await general_operate.get_cache_data(prefix, identifier)
+        
+        # Should return None and log error
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_delete_cache_data_success(self, general_operate):
+        """Test successful cache data deletion"""
+        prefix = "user_cache"
+        identifier = "user123"
+        expected_key = f"{prefix}:{identifier}"
+        
+        # Mock Redis delete returning 1 (key was deleted)
+        general_operate.redis.delete.return_value = 1
+        
+        result = await general_operate.delete_cache_data(prefix, identifier)
+        
+        # Verify Redis delete was called with correct key
+        general_operate.redis.delete.assert_called_once_with(expected_key)
+        
+        # Verify result
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_delete_cache_data_not_found(self, general_operate):
+        """Test cache data deletion when key doesn't exist"""
+        prefix = "user_cache"
+        identifier = "nonexistent"
+        
+        # Mock Redis delete returning 0 (no key was deleted)
+        general_operate.redis.delete.return_value = 0
+        
+        result = await general_operate.delete_cache_data(prefix, identifier)
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_delete_cache_data_multiple_keys_deleted(self, general_operate):
+        """Test cache data deletion when multiple keys are deleted"""
+        prefix = "user_cache"
+        identifier = "user123"
+        
+        # Mock Redis delete returning 2 (multiple keys deleted - edge case)
+        general_operate.redis.delete.return_value = 2
+        
+        result = await general_operate.delete_cache_data(prefix, identifier)
+        
+        # Should still return True if any keys were deleted
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_cache_exists_true(self, general_operate):
+        """Test cache exists check when key exists"""
+        prefix = "user_cache"
+        identifier = "user123"
+        expected_key = f"{prefix}:{identifier}"
+        
+        # Mock Redis exists returning 1 (key exists)
+        general_operate.redis.exists.return_value = 1
+        
+        result = await general_operate.cache_exists(prefix, identifier)
+        
+        # Verify Redis exists was called with correct key
+        general_operate.redis.exists.assert_called_once_with(expected_key)
+        
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_cache_exists_false(self, general_operate):
+        """Test cache exists check when key doesn't exist"""
+        prefix = "user_cache"
+        identifier = "nonexistent"
+        
+        # Mock Redis exists returning 0 (key doesn't exist)
+        general_operate.redis.exists.return_value = 0
+        
+        result = await general_operate.cache_exists(prefix, identifier)
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_cache_extend_ttl_success(self, general_operate):
+        """Test successful TTL extension"""
+        prefix = "user_cache"
+        identifier = "user123"
+        additional_seconds = 1800  # 30 minutes
+        expected_key = f"{prefix}:{identifier}"
+        
+        # Mock current TTL of 3600 seconds (1 hour)
+        general_operate.redis.ttl.return_value = 3600
+        general_operate.redis.expire.return_value = True
+        
+        result = await general_operate.cache_extend_ttl(prefix, identifier, additional_seconds)
+        
+        # Verify TTL was checked
+        general_operate.redis.ttl.assert_called_once_with(expected_key)
+        
+        # Verify expire was called with new TTL (3600 + 1800 = 5400)
+        general_operate.redis.expire.assert_called_once_with(expected_key, 5400)
+        
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_cache_extend_ttl_key_not_exists(self, general_operate):
+        """Test TTL extension when key doesn't exist"""
+        prefix = "user_cache"
+        identifier = "nonexistent"
+        additional_seconds = 1800
+        
+        # Mock TTL returning -2 (key doesn't exist)
+        general_operate.redis.ttl.return_value = -2
+        
+        result = await general_operate.cache_extend_ttl(prefix, identifier, additional_seconds)
+        
+        # Should return False and not call expire
+        assert result is False
+        general_operate.redis.expire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_extend_ttl_key_no_expiry(self, general_operate):
+        """Test TTL extension when key has no expiry"""
+        prefix = "user_cache"
+        identifier = "persistent"
+        additional_seconds = 1800
+        
+        # Mock TTL returning -1 (key exists but has no expiry)
+        general_operate.redis.ttl.return_value = -1
+        
+        result = await general_operate.cache_extend_ttl(prefix, identifier, additional_seconds)
+        
+        # Should return False and not call expire
+        assert result is False
+        general_operate.redis.expire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_extend_ttl_expire_failed(self, general_operate):
+        """Test TTL extension when expire operation fails"""
+        prefix = "user_cache"
+        identifier = "user123"
+        additional_seconds = 1800
+        
+        # Mock current TTL of 3600 seconds
+        general_operate.redis.ttl.return_value = 3600
+        # Mock expire returning False (operation failed)
+        general_operate.redis.expire.return_value = False
+        
+        result = await general_operate.cache_extend_ttl(prefix, identifier, additional_seconds)
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_cache_data_workflow_integration(self, general_operate):
+        """Test complete cache data workflow"""
+        prefix = "integration_test"
+        identifier = "workflow1"
+        test_data = {"step": 1, "status": "processing"}
+        ttl_seconds = 1800
+        
+        # 1. Store cache data
+        await general_operate.store_cache_data(prefix, identifier, test_data, ttl_seconds)
+        
+        # Simulate Redis behavior for get
+        call_args = general_operate.redis.setex.call_args
+        stored_data = call_args[0][2]  # The serialized data that was stored
+        general_operate.redis.get.return_value = stored_data
+        
+        # 2. Check if cache exists
+        general_operate.redis.exists.return_value = 1
+        exists = await general_operate.cache_exists(prefix, identifier)
+        assert exists is True
+        
+        # 3. Get cache data
+        retrieved_data = await general_operate.get_cache_data(prefix, identifier)
+        assert retrieved_data is not None
+        assert retrieved_data["step"] == 1
+        assert retrieved_data["status"] == "processing"
+        
+        # 4. Extend TTL
+        general_operate.redis.ttl.return_value = 1800
+        general_operate.redis.expire.return_value = True
+        extended = await general_operate.cache_extend_ttl(prefix, identifier, 600)
+        assert extended is True
+        
+        # 5. Delete cache data
+        general_operate.redis.delete.return_value = 1
+        deleted = await general_operate.delete_cache_data(prefix, identifier)
+        assert deleted is True
+        
+        # 6. Verify cache no longer exists
+        general_operate.redis.exists.return_value = 0
+        exists_after_delete = await general_operate.cache_exists(prefix, identifier)
+        assert exists_after_delete is False
+
+    @pytest.mark.asyncio
+    async def test_cache_data_special_characters(self, general_operate):
+        """Test cache data with special characters and Unicode"""
+        prefix = "special_chars"
+        identifier = "unicode_test"
+        test_data = {
+            "chinese": "你好世界",
+            "emoji": "🚀🌟",
+            "special": "!@#$%^&*()",
+            "quotes": 'Hello "World" with \'quotes\''
+        }
+        
+        await general_operate.store_cache_data(prefix, identifier, test_data)
+        
+        # Verify data was properly serialized
+        call_args = general_operate.redis.setex.call_args
+        serialized_data = call_args[0][2]
+        
+        # Should be valid JSON
+        deserialized = json.loads(serialized_data)
+        assert deserialized["chinese"] == "你好世界"
+        assert deserialized["emoji"] == "🚀🌟"
+        assert deserialized["special"] == "!@#$%^&*()"
+        assert deserialized["quotes"] == 'Hello "World" with \'quotes\''
+
+    @pytest.mark.asyncio
+    async def test_cache_data_large_data(self, general_operate):
+        """Test cache data with large data structures"""
+        prefix = "large_data"
+        identifier = "big_object"
+        
+        # Create a large data structure
+        test_data = {
+            "large_list": list(range(1000)),
+            "large_dict": {f"key_{i}": f"value_{i}" for i in range(100)},
+            "nested": {
+                "level1": {
+                    "level2": {
+                        "level3": {"data": "deep_value"}
+                    }
+                }
+            }
+        }
+        
+        await general_operate.store_cache_data(prefix, identifier, test_data)
+        
+        # Verify large data was properly handled
+        general_operate.redis.setex.assert_called_once()
+        
+        call_args = general_operate.redis.setex.call_args
+        serialized_data = call_args[0][2]
+        
+        # Should be valid JSON
+        deserialized = json.loads(serialized_data)
+        assert len(deserialized["large_list"]) == 1000
+        assert len(deserialized["large_dict"]) == 100
+        assert deserialized["nested"]["level1"]["level2"]["level3"]["data"] == "deep_value"

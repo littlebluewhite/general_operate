@@ -24,7 +24,7 @@ class SQLOperate:
         self._is_postgresql = client.engine_type.lower() == "postgresql"
 
     def _validate_identifier(
-        self, identifier: str, identifier_type: str = "identifier"
+            self, identifier: str, identifier_type: str = "identifier"
     ) -> None:
         """Validate SQL identifiers (table names, column names) to prevent SQL injection"""
         if not identifier or not isinstance(identifier, str):
@@ -118,10 +118,10 @@ class SQLOperate:
                     )
 
     def _validate_data_dict(
-        self,
-        data: dict[str, Any],
-        operation: str = "operation",
-        allow_empty: bool = False,
+            self,
+            data: dict[str, Any],
+            operation: str = "operation",
+            allow_empty: bool = False,
     ) -> dict[str, Any]:
         """Validate a data dictionary for database operations"""
         if not isinstance(data, dict):
@@ -180,7 +180,7 @@ class SQLOperate:
         return AsyncSession(self.__sqlClient.get_engine())
 
     def _build_where_clause(
-        self, filters: dict[str, Any] | None
+            self, filters: dict[str, Any] | None
     ) -> tuple[str, dict[str, Any]]:
         """Build WHERE clause and parameters from filters"""
         if not filters:
@@ -233,7 +233,7 @@ class SQLOperate:
         return self.__sqlClient
 
     async def create_sql(
-        self, table_name: str, data: dict[str, Any] | list[dict[str, Any]], session: AsyncSession = None
+            self, table_name: str, data: dict[str, Any] | list[dict[str, Any]], session: AsyncSession = None
     ) -> list[dict[str, Any]]:
         """Create multiple records in a single transaction for better performance
 
@@ -377,14 +377,14 @@ class SQLOperate:
                     raise e
 
     async def read_sql(
-        self,
-        table_name: str,
-        filters: dict[str, Any] | None = None,
-        order_by: str | None = None,
-        order_direction: str = "ASC",
-        limit: int | None = None,
-        offset: int = 0,
-        session: AsyncSession = None,
+            self,
+            table_name: str,
+            filters: dict[str, Any] | None = None,
+            order_by: str | None = None,
+            order_direction: str = "ASC",
+            limit: int | None = None,
+            offset: int = 0,
+            session: AsyncSession = None,
     ) -> list[dict[str, Any]]:
         self._validate_identifier(table_name, "table name")
 
@@ -452,7 +452,7 @@ class SQLOperate:
                 return await _execute_read(auto_session)
 
     async def count_sql(
-        self, table_name: str, filters: dict[str, Any] | None = None, session: AsyncSession = None
+            self, table_name: str, filters: dict[str, Any] | None = None, session: AsyncSession = None
     ) -> int:
         """Get the total count of records in a table with optional filters"""
         self._validate_identifier(table_name, "table name")
@@ -475,6 +475,276 @@ class SQLOperate:
         else:
             async with self.create_external_session() as auto_session:
                 return await _execute_count(auto_session)
+
+    async def read_sql_with_date_range(
+            self,
+            table_name: str,
+            filters: dict[str, Any] | None = None,
+            date_field: str = "created_at",
+            start_date: Any = None,
+            end_date: Any = None,
+            order_by: str | None = None,
+            order_direction: str = "DESC",
+            limit: int | None = None,
+            offset: int = 0,
+            session: AsyncSession = None,
+    ) -> list[dict[str, Any]]:
+        """Read data with date range filtering"""
+        self._validate_identifier(table_name, "table name")
+        self._validate_identifier(date_field, "date field")
+
+        if order_by:
+            self._validate_identifier(order_by, "order_by column name")
+
+        if order_direction.upper() not in ["ASC", "DESC"]:
+            raise self.__exc(
+                status_code=400,
+                message="order_direction must be 'ASC' or 'DESC'",
+                message_code=108,
+            )
+
+        if limit is not None and limit <= 0:
+            raise self.__exc(
+                status_code=400,
+                message="limit must be a positive integer",
+                message_code=109,
+            )
+
+        if offset < 0:
+            raise self.__exc(
+                status_code=400, message="offset must be non-negative", message_code=110
+            )
+
+        async def _execute_read_date_range(active_session: AsyncSession) -> list[dict[str, Any]]:
+            query = f"SELECT * FROM {table_name}"
+
+            # Build WHERE clause with date range
+            where_conditions = []
+            params = {}
+
+            # Add standard filters
+            if filters:
+                for key, value in filters.items():
+                    self._validate_identifier(key, "filter column name")
+                    if isinstance(value, list):
+                        # Handle IN clause for list values
+                        # Filter out null values from the list
+                        filtered_values = [v for v in value if v not in self.null_set]
+                        if filtered_values:  # Only add condition if there are non-null values
+                            placeholders = ", ".join([f":filter_{key}_{i}" for i in range(len(filtered_values))])
+                            where_conditions.append(f"{key} IN ({placeholders})")
+                            for i, v in enumerate(filtered_values):
+                                params[f"filter_{key}_{i}"] = v
+                    elif value not in self.null_set:
+                        where_conditions.append(f"{key} = :filter_{key}")
+                        params[f"filter_{key}"] = value
+
+            # Add date range filters
+            if start_date is not None:
+                where_conditions.append(f"{date_field} >= :start_date")
+                params["start_date"] = start_date
+
+            if end_date is not None:
+                where_conditions.append(f"{date_field} <= :end_date")
+                params["end_date"] = end_date
+
+            # Add WHERE clause if there are conditions
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
+
+            # Add ORDER BY clause
+            if order_by:
+                query += f" ORDER BY {order_by} {order_direction.upper()}"
+
+            # Add LIMIT and OFFSET for pagination
+            if limit is not None:
+                if self._is_postgresql:
+                    query += f" LIMIT {limit} OFFSET {offset}"
+                else:  # MySQL
+                    query += f" LIMIT {offset}, {limit}"
+            elif offset > 0:
+                if self._is_postgresql:
+                    query += f" OFFSET {offset}"
+                else:  # MySQL requires LIMIT when using OFFSET
+                    query += f" LIMIT {offset}, 18446744073709551615"
+
+            result = await active_session.execute(text(query), params)
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+        if session:
+            return await _execute_read_date_range(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                return await _execute_read_date_range(auto_session)
+
+    async def read_sql_with_conditions(
+            self,
+            table_name: str,
+            conditions: list[str],
+            params: dict[str, Any],
+            order_by: str | None = None,
+            order_direction: str = "DESC",
+            limit: int | None = None,
+            offset: int = 0,
+            session: AsyncSession = None,
+    ) -> list[dict[str, Any]]:
+        """Read data with complex WHERE conditions"""
+        self._validate_identifier(table_name, "table name")
+
+        if order_by:
+            self._validate_identifier(order_by, "order_by column name")
+
+        if order_direction.upper() not in ["ASC", "DESC"]:
+            raise self.__exc(
+                status_code=400,
+                message="order_direction must be 'ASC' or 'DESC'",
+                message_code=108,
+            )
+
+        if limit is not None and limit <= 0:
+            raise self.__exc(
+                status_code=400,
+                message="limit must be a positive integer",
+                message_code=109,
+            )
+
+        if offset < 0:
+            raise self.__exc(
+                status_code=400, message="offset must be non-negative", message_code=110
+            )
+
+        async def _execute_read_conditions(active_session: AsyncSession) -> list[dict[str, Any]]:
+            query = f"SELECT * FROM {table_name}"
+
+            # Add WHERE clause with conditions
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            # Add ORDER BY clause - handle multiple columns
+            if order_by:
+                query += f" ORDER BY {order_by}"
+                if order_direction.upper() in ["ASC", "DESC"]:
+                    # Only add direction if it's a simple column, not complex like "priority DESC, created_at ASC"
+                    if "," not in order_by and order_by.upper() not in ["ASC", "DESC"]:
+                        query += f" {order_direction.upper()}"
+
+            # Add LIMIT and OFFSET for pagination
+            if limit is not None:
+                if self._is_postgresql:
+                    query += f" LIMIT {limit} OFFSET {offset}"
+                else:  # MySQL
+                    query += f" LIMIT {offset}, {limit}"
+            elif offset > 0:
+                if self._is_postgresql:
+                    query += f" OFFSET {offset}"
+                else:  # MySQL requires LIMIT when using OFFSET
+                    query += f" LIMIT {offset}, 18446744073709551615"
+
+            result = await active_session.execute(text(query), params)
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+        if session:
+            return await _execute_read_conditions(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                return await _execute_read_conditions(auto_session)
+
+    async def get_aggregated_data(
+            self,
+            table_name: str,
+            group_by: list[str],
+            aggregations: dict[str, str] = None,
+            filters: dict[str, Any] | None = None,
+            having_conditions: list[str] | None = None,
+            session: AsyncSession = None,
+    ) -> list[dict[str, Any]]:
+        """Get aggregated data with GROUP BY"""
+        self._validate_identifier(table_name, "table name")
+
+        # Validate group by fields
+        for field in group_by:
+            self._validate_identifier(field, "group by field")
+
+        if not aggregations:
+            aggregations = {"count": "*"}
+
+        async def _execute_aggregation(active_session: AsyncSession) -> list[dict[str, Any]]:
+            # Build SELECT clause
+            select_fields = ", ".join(group_by)
+
+            # Add aggregation fields
+            agg_fields = []
+            for alias, expression in aggregations.items():
+                if expression == "*":
+                    agg_fields.append(f"COUNT(*) as {alias}")
+                else:
+                    # Validate aggregation field
+                    self._validate_identifier(expression, "aggregation field")
+                    agg_fields.append(f"COUNT({expression}) as {alias}")
+
+            if agg_fields:
+                select_fields += ", " + ", ".join(agg_fields)
+
+            query = f"SELECT {select_fields} FROM {table_name}"
+
+            # Add WHERE clause
+            where_clause, params = self._build_where_clause(filters)
+            query += where_clause
+
+            # Add GROUP BY clause
+            query += f" GROUP BY {', '.join(group_by)}"
+
+            # Add HAVING clause
+            if having_conditions:
+                query += " HAVING " + " AND ".join(having_conditions)
+
+            result = await active_session.execute(text(query), params)
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
+
+        if session:
+            return await _execute_aggregation(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                return await _execute_aggregation(auto_session)
+
+    async def execute_raw_query(
+            self,
+            query: str,
+            params: dict[str, Any] = None,
+            fetch_mode: str = "all",
+            session: AsyncSession = None,
+    ) -> list[dict[str, Any]] | dict[str, Any] | None:
+        """Execute raw SQL query safely"""
+        if params is None:
+            params = {}
+
+        if fetch_mode not in ["all", "one", "none"]:
+            raise self.__exc(
+                status_code=400,
+                message="fetch_mode must be 'all', 'one', or 'none'",
+                message_code=111,
+            )
+
+        async def _execute_raw(active_session: AsyncSession):
+            result = await active_session.execute(text(query), params)
+
+            if fetch_mode == "none":
+                return None
+            elif fetch_mode == "one":
+                row = result.fetchone()
+                return dict(row._mapping) if row else None
+            else:  # fetch_mode == "all"
+                rows = result.fetchall()
+                return [dict(row._mapping) for row in rows]
+
+        if session:
+            return await _execute_raw(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                return await _execute_raw(auto_session)
 
     async def read_one(
         self, table_name: str, id_value: Any, id_column: str = "id", session: AsyncSession = None
@@ -751,15 +1021,15 @@ class SQLOperate:
                     raise e
 
     async def execute_query(
-        self, query: str, params: dict[str, Any] | None = None
+            self, query: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]] | dict[str, Any]:
         async with self.create_external_session() as session:
             result = await session.execute(text(query), params or {})
 
             if (
-                query.strip()
-                .upper()
-                .startswith(("SELECT", "SHOW", "DESCRIBE", "EXPLAIN"))
+                    query.strip()
+                            .upper()
+                            .startswith(("SELECT", "SHOW", "DESCRIBE", "EXPLAIN"))
             ):
                 rows = result.fetchall()
                 return [dict(row._mapping) for row in rows]

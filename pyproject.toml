@@ -121,7 +121,6 @@ minversion = "8.0"
 addopts = "-ra -q --strict-markers --strict-config"
 testpaths = ["tests"]
 markers = ["asyncio: marks tests as async"]
-asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["general_operator"]
@@ -139,4 +138,9 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.0.0",
 ]

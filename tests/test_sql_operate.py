@@ -764,3 +764,442 @@ async def test_integration_workflow(sql_operate_postgres):
 
             health = await sql_operate_postgres.health_check()
             assert health is True
+
+
+class TestSQLOperateReadWithDateRange:
+    """Test read_sql_with_date_range method"""
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_basic(self, sql_operate_postgres):
+        """Test basic date range query"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        end_date = datetime(2023, 12, 31)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_rows = [
+                MagicMock(_mapping={"id": 1, "name": "Record 1", "created_at": start_date}),
+                MagicMock(_mapping={"id": 2, "name": "Record 2", "created_at": end_date}),
+            ]
+            mock_result.fetchall.return_value = mock_rows
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.read_sql_with_date_range(
+                "events", 
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            assert len(result) == 2
+            assert result[0]["name"] == "Record 1"
+            assert result[1]["name"] == "Record 2"
+            
+            # Verify query contains date range conditions
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "created_at >= :start_date" in query_text
+            assert "created_at <= :end_date" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_custom_field(self, sql_operate_postgres):
+        """Test date range query with custom date field"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "orders",
+                date_field="order_date",
+                start_date=start_date
+            )
+            
+            # Verify custom date field is used
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "order_date >= :start_date" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_and_filters(self, sql_operate_postgres):
+        """Test date range query with additional filters"""
+        from datetime import datetime
+        
+        filters = {"status": "active", "category": "electronics"}
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "products",
+                filters=filters,
+                start_date=start_date
+            )
+            
+            # Verify both filters and date range are included
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "status = :filter_status" in query_text
+            assert "category = :filter_category" in query_text
+            assert "created_at >= :start_date" in query_text
+            assert " AND " in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_list_filters(self, sql_operate_postgres):
+        """Test date range query with list filters (IN clause)"""
+        from datetime import datetime
+        
+        filters = {"status": ["active", "pending", "completed"]}
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "orders",
+                filters=filters,
+                start_date=start_date
+            )
+            
+            # Verify IN clause is generated correctly
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "status IN (:filter_status_0, :filter_status_1, :filter_status_2)" in query_text
+            assert "created_at >= :start_date" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_null_filters(self, sql_operate_postgres):
+        """Test date range query with null values in filters (should be filtered out)"""
+        from datetime import datetime
+        
+        filters = {"name": "John", "age": -999999, "city": "null"}
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "users",
+                filters=filters,
+                start_date=start_date
+            )
+            
+            # Verify only non-null values are in the query
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "name = :filter_name" in query_text
+            assert "age = :filter_age" not in query_text  # Should be filtered out
+            assert "city = :filter_city" not in query_text  # Should be filtered out
+            assert "created_at >= :start_date" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_only_start_date(self, sql_operate_postgres):
+        """Test date range query with only start date"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "events",
+                start_date=start_date
+            )
+            
+            # Verify only start date condition is added
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "created_at >= :start_date" in query_text
+            assert "created_at <= :end_date" not in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_only_end_date(self, sql_operate_postgres):
+        """Test date range query with only end date"""
+        from datetime import datetime
+        
+        end_date = datetime(2023, 12, 31)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "events",
+                end_date=end_date
+            )
+            
+            # Verify only end date condition is added
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "created_at <= :end_date" in query_text
+            assert "created_at >= :start_date" not in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_no_dates(self, sql_operate_postgres):
+        """Test date range query with no date filters (should work like regular read)"""
+        filters = {"status": "active"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "events",
+                filters=filters
+            )
+            
+            # Verify no date conditions are added
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "status = :filter_status" in query_text
+            assert "created_at >= :start_date" not in query_text
+            assert "created_at <= :end_date" not in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_with_ordering(self, sql_operate_postgres):
+        """Test date range query with ordering"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "events",
+                start_date=start_date,
+                order_by="created_at",
+                order_direction="ASC"
+            )
+            
+            # Verify ORDER BY is included
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "ORDER BY created_at ASC" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_pagination_postgresql(self, sql_operate_postgres):
+        """Test date range query with pagination on PostgreSQL"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_date_range(
+                "events",
+                start_date=start_date,
+                limit=10,
+                offset=5
+            )
+            
+            # Check PostgreSQL pagination syntax
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "LIMIT 10 OFFSET 5" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_pagination_mysql(self, sql_operate_mysql):
+        """Test date range query with pagination on MySQL"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        
+        with patch.object(sql_operate_mysql, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_mysql.read_sql_with_date_range(
+                "events",
+                start_date=start_date,
+                limit=10,
+                offset=5
+            )
+            
+            # Check MySQL pagination syntax
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "LIMIT 5, 10" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_table_name(self, sql_operate_postgres):
+        """Test date range query with invalid table name"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("invalid-table")
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_date_field(self, sql_operate_postgres):
+        """Test date range query with invalid date field"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("events", date_field="invalid-field")
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_order_by(self, sql_operate_postgres):
+        """Test date range query with invalid order_by column"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("events", order_by="invalid-column")
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_order_direction(self, sql_operate_postgres):
+        """Test date range query with invalid order direction"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("events", order_direction="INVALID")
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 108
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_limit(self, sql_operate_postgres):
+        """Test date range query with invalid limit"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("events", limit=0)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 109
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_offset(self, sql_operate_postgres):
+        """Test date range query with invalid offset"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("events", offset=-1)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 110
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_invalid_filter_column(self, sql_operate_postgres):
+        """Test date range query with invalid filter column name"""
+        filters = {"invalid-column": "value"}
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_date_range("events", filters=filters)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_with_external_session(self, sql_operate_postgres):
+        """Test date range query with external session"""
+        from datetime import datetime
+        
+        start_date = datetime(2023, 1, 1)
+        external_session = AsyncMock(spec=AsyncSession)
+        
+        mock_result = MagicMock()
+        mock_rows = [MagicMock(_mapping={"id": 1, "name": "Record 1"})]
+        mock_result.fetchall.return_value = mock_rows
+        external_session.execute.return_value = mock_result
+        
+        result = await sql_operate_postgres.read_sql_with_date_range(
+            "events",
+            start_date=start_date,
+            session=external_session
+        )
+        
+        assert len(result) == 1
+        assert result[0]["name"] == "Record 1"
+        
+        # Verify external session was used
+        external_session.execute.assert_called_once()
+        # External session should not be committed/rolled back
+        external_session.commit.assert_not_called()
+        external_session.rollback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_read_with_date_range_various_date_types(self, sql_operate_postgres):
+        """Test date range query with various date types"""
+        from datetime import datetime, date
+        import time
+        
+        # Test with different date types
+        test_cases = [
+            # datetime object
+            {"start": datetime(2023, 1, 1), "end": datetime(2023, 12, 31)},
+            # date object
+            {"start": date(2023, 1, 1), "end": date(2023, 12, 31)},
+            # timestamp
+            {"start": 1672531200, "end": 1704067199},  # 2023 timestamps
+            # string dates
+            {"start": "2023-01-01", "end": "2023-12-31"},
+        ]
+        
+        for i, dates in enumerate(test_cases):
+            with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+                mock_session = AsyncMock()
+                mock_session_ctx.return_value.__aenter__.return_value = mock_session
+                
+                mock_result = MagicMock()
+                mock_result.fetchall.return_value = []
+                mock_session.execute.return_value = mock_result
+                
+                await sql_operate_postgres.read_sql_with_date_range(
+                    "events",
+                    start_date=dates["start"],
+                    end_date=dates["end"]
+                )
+                
+                # Verify the function was called successfully
+                mock_session.execute.assert_called_once()
+                
+                # Verify the query contains date range conditions
+                call_args = mock_session.execute.call_args[0]
+                query_text = str(call_args[0])
+                assert "created_at >= :start_date" in query_text
+                assert "created_at <= :end_date" in query_text

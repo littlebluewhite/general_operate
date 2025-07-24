@@ -34,3 +34,5 @@ node_modules/
 /CLAUDE.md
 /task
 /docs/improve_/
+/docs/kafka/
+/.coverage

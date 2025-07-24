@@ -282,3 +282,37 @@ async def test_integration_workflow(redis_operate, mock_redis):
     # 4. Delete a field
     deleted = await redis_operate.delete_caches("users", {"age"})
     assert deleted == 1
+
+
+@pytest.mark.asyncio
+async def test_store_cache_single_item(redis_operate, mock_redis):
+    """Test store_cache method with single item"""
+    test_data = {"test": "value"}
+    
+    await redis_operate.store_cache("prefix", "identifier", test_data, 3600)
+    
+    # Verify setex was called
+    mock_redis.setex.assert_called_once()
+    args = mock_redis.setex.call_args[0]
+    assert args[0] == "prefix:identifier"  # key
+    assert args[1] == 3600  # ttl
+    assert '"test": "value"' in args[2]  # serialized data
+
+
+@pytest.mark.asyncio
+async def test_health_check_redis_error(redis_operate, mock_redis):
+    """Test health check with Redis error"""
+    from redis import ConnectionError as RedisConnectionError
+    mock_redis.ping.side_effect = RedisConnectionError("Connection failed")
+    
+    result = await redis_operate.health_check()
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_unexpected_error(redis_operate, mock_redis):
+    """Test health check with unexpected error"""
+    mock_redis.ping.side_effect = ValueError("Unexpected error")
+    
+    result = await redis_operate.health_check()
+    assert result is False

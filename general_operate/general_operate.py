@@ -3,6 +3,7 @@ import functools
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Awaitable
 from datetime import datetime, UTC
 from typing import Any, Generic, TypeVar
 from contextlib import asynccontextmanager
@@ -20,6 +21,9 @@ from .app.cache_operate import CacheOperate
 from .app.client.influxdb import InfluxDB
 from .app.influxdb_operate import InfluxOperate
 from .app.sql_operate import SQLOperate
+from .kafka.producer_operate import KafkaProducerOperate
+from .kafka.consumer_operate import KafkaConsumerOperate
+from .kafka.event_bus import KafkaEventBus
 
 T = TypeVar('T')
 
@@ -27,7 +31,13 @@ T = TypeVar('T')
 class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
     """
     Base class for all database operators
-    Provides unified interface for SQL, cache, and time-series data operations
+    Provides unified interface for SQL, cache, time-series data, and Kafka event operations
+    
+    Now supports four data operation layers:
+    1. SQL: Primary data storage with ACID transactions
+    2. Cache (Redis): High-performance data caching
+    3. InfluxDB: Time-series data storage  
+    4. Kafka: Event-driven messaging and streaming (new)
     """
 
     def __init__(
@@ -35,6 +45,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         database_client = None,
         redis_client: redis.asyncio.Redis = None,
         influxdb: InfluxDB = None,
+        kafka_config: dict[str, Any] | None = None,
         exc=GeneralOperateException,
     ):
         # Get module from subclass
@@ -51,6 +62,46 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         CacheOperate.__init__(self, redis_client, exc)
         SQLOperate.__init__(self, database_client, exc)
         InfluxOperate.__init__(self, influxdb)
+        
+        # Initialize Kafka components
+        self._kafka_producer = None
+        self._kafka_consumer = None
+        self._kafka_event_bus = None
+        if kafka_config:
+            # Producer
+            if kafka_config.get('producer') or kafka_config.get('enable_producer', True):
+                self._kafka_producer = KafkaProducerOperate(
+                    bootstrap_servers=kafka_config['bootstrap_servers'],
+                    client_id=kafka_config.get('client_id', f"{self.table_name}-producer"),
+                    config=kafka_config.get('producer', {})
+                )
+            
+            # Consumer
+            if kafka_config.get('consumer'):
+                consumer_config = kafka_config['consumer']
+                # Filter out topics and group_id from config as they're passed as separate parameters
+                consumer_only_config = {k: v for k, v in consumer_config.items() 
+                                      if k not in ['topics', 'group_id']}
+                self._kafka_consumer = KafkaConsumerOperate(
+                    bootstrap_servers=kafka_config['bootstrap_servers'],
+                    topics=consumer_config['topics'],
+                    group_id=consumer_config['group_id'],
+                    client_id=kafka_config.get('client_id', f"{self.table_name}-consumer"),
+                    config=consumer_only_config
+                )
+            
+            # Event Bus
+            if kafka_config.get('event_bus'):
+                event_bus_config = kafka_config['event_bus']
+                # Filter out default_topic from config as it's passed as a separate parameter
+                event_bus_only_config = {k: v for k, v in event_bus_config.items() 
+                                       if k not in ['default_topic']}
+                self._kafka_event_bus = KafkaEventBus(
+                    bootstrap_servers=kafka_config['bootstrap_servers'],
+                    client_id=kafka_config.get('client_id', f"{self.table_name}-eventbus"),
+                    default_topic=event_bus_config.get('default_topic', 'events'),
+                    config=event_bus_only_config
+                )
 
         # Set up logging
         self.logger = structlog.get_logger().bind(
@@ -847,3 +898,161 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
     async def delete_cache_data(self, prefix: str, identifier: str) -> bool:
         """Delete data from Redis cache"""
         return await self.delete_cache(prefix, identifier)
+
+    # Kafka-related methods
+    @asynccontextmanager
+    async def kafka_lifespan(self):
+        """Kafka lifecycle management context manager"""
+        kafka_components = []
+        try:
+            if self._kafka_producer:
+                await self._kafka_producer.start()
+                kafka_components.append(self._kafka_producer)
+            if self._kafka_consumer:
+                await self._kafka_consumer.start()
+                kafka_components.append(self._kafka_consumer)
+            if self._kafka_event_bus:
+                await self._kafka_event_bus.start()
+                kafka_components.append(self._kafka_event_bus)
+            yield self
+        finally:
+            # Stop components in reverse order
+            for component in reversed(kafka_components):
+                try:
+                    await component.stop()
+                except Exception as e:
+                    self.logger.warning(f"Error stopping Kafka component: {e}")
+
+    @exception_handler
+    async def send_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        topic: str | None = None,
+        key: str | None = None,
+        headers: dict[str, bytes] | None = None,
+        **kwargs
+    ) -> None:
+        """Send event to Kafka"""
+        if not self._kafka_producer:
+            raise self.__exc(
+                status_code=400,
+                message="Kafka producer not configured",
+                message_code=4200
+            )
+        
+        # Determine topic
+        if not topic:
+            topic = getattr(self.module, 'topic_name', None)
+            if not topic:
+                raise self.__exc(
+                    status_code=400,
+                    message="No topic specified and no default topic in module",
+                    message_code=4201
+                )
+        
+        # Build event data with context
+        event_data = {
+            "table_name": self.table_name,
+            "event_type": event_type,
+            "data": data,
+            "timestamp": datetime.now(UTC).isoformat(),
+            **kwargs
+        }
+        
+        # Add default headers
+        default_headers = {
+            "event_type": event_type.encode('utf-8'),
+            "table_name": self.table_name.encode('utf-8')
+        }
+        if headers:
+            default_headers.update(headers)
+        
+        await self._kafka_producer.send_event(
+            topic=topic,
+            value=event_data,
+            key=key,
+            headers=default_headers
+        )
+
+    @exception_handler
+    async def start_consuming(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """Start consuming events from Kafka"""
+        if not self._kafka_consumer:
+            raise self.__exc(
+                status_code=400,
+                message="Kafka consumer not configured",
+                message_code=4202
+            )
+        
+        await self._kafka_consumer.consume_events(handler)
+
+    @exception_handler
+    async def publish_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        topic: str | None = None,
+        key: str | None = None,
+    ) -> Any:
+        """Publish event using event bus (high-level interface)"""
+        if not self._kafka_event_bus:
+            raise self.__exc(
+                status_code=400,
+                message="Kafka event bus not configured",
+                message_code=4203
+            )
+        
+        return await self._kafka_event_bus.publish(
+            event_type=event_type,
+            data=data,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            metadata=metadata,
+            topic=topic,
+            key=key
+        )
+
+    @exception_handler
+    async def subscribe_event(
+        self,
+        event_type: str,
+        handler: Callable[[Any], Awaitable[None]],
+        topic: str | None = None,
+        group_id: str | None = None,
+        filter_func: Callable[[Any], bool] | None = None,
+    ) -> str:
+        """Subscribe to events using event bus"""
+        if not self._kafka_event_bus:
+            raise self.__exc(
+                status_code=400,
+                message="Kafka event bus not configured",
+                message_code=4203
+            )
+        
+        return await self._kafka_event_bus.subscribe(
+            event_type=event_type,
+            handler=handler,
+            topic=topic,
+            group_id=group_id or f"{self.table_name}-{event_type}",
+            filter_func=filter_func
+        )
+
+    async def kafka_health_check(self) -> dict[str, Any]:
+        """Check health of Kafka components"""
+        health: dict = {
+            "producer": self._kafka_producer.is_started if self._kafka_producer else None,
+            "consumer": self._kafka_consumer.is_started if self._kafka_consumer else None,
+            "event_bus": None
+        }
+        
+        if self._kafka_event_bus:
+            health["event_bus"] = await self._kafka_event_bus.health_check()
+        
+        return health

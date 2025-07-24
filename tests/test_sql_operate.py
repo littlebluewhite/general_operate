@@ -1203,3 +1203,733 @@ class TestSQLOperateReadWithDateRange:
                 query_text = str(call_args[0])
                 assert "created_at >= :start_date" in query_text
                 assert "created_at <= :end_date" in query_text
+
+
+class TestSQLOperateReadWithConditions:
+    """Test read_sql_with_conditions method"""
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_basic(self, sql_operate_postgres):
+        """Test basic conditional query"""
+        conditions = ["age > :min_age", "status = :status"]
+        params = {"min_age": 18, "status": "active"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_rows = [
+                MagicMock(_mapping={"id": 1, "name": "Alice", "age": 25, "status": "active"}),
+                MagicMock(_mapping={"id": 2, "name": "Bob", "age": 30, "status": "active"}),
+            ]
+            mock_result.fetchall.return_value = mock_rows
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params
+            )
+            
+            assert len(result) == 2
+            assert result[0]["name"] == "Alice"
+            assert result[1]["name"] == "Bob"
+            
+            # Verify query structure
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "SELECT * FROM users WHERE" in query_text
+            assert "age > :min_age AND status = :status" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_no_conditions(self, sql_operate_postgres):
+        """Test conditional query with empty conditions"""
+        conditions = []
+        params = {}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params
+            )
+            
+            # Verify query doesn't have WHERE clause
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "SELECT * FROM users" in query_text
+            assert "WHERE" not in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_ordering(self, sql_operate_postgres):
+        """Test conditional query with ordering"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, order_by="name", order_direction="ASC"
+            )
+            
+            # Verify ORDER BY is included
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "ORDER BY name ASC" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_simple_ordering(self, sql_operate_postgres):
+        """Test conditional query with simple ordering"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, order_by="priority"
+            )
+            
+            # Verify ORDER BY is included correctly
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "ORDER BY priority" in query_text
+            assert "ORDER BY priority DESC, created_at ASC DESC" not in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_pagination_postgresql(self, sql_operate_postgres):
+        """Test conditional query with pagination on PostgreSQL"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, limit=10, offset=5
+            )
+            
+            # Check PostgreSQL pagination syntax
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "LIMIT 10 OFFSET 5" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_pagination_mysql(self, sql_operate_mysql):
+        """Test conditional query with pagination on MySQL"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with patch.object(sql_operate_mysql, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_mysql.read_sql_with_conditions(
+                "users", conditions, params, limit=10, offset=5
+            )
+            
+            # Check MySQL pagination syntax
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "LIMIT 5, 10" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_only_offset_postgresql(self, sql_operate_postgres):
+        """Test conditional query with only offset (no limit) on PostgreSQL"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, offset=10
+            )
+            
+            # Check PostgreSQL offset-only syntax
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "OFFSET 10" in query_text
+            assert "LIMIT" not in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_only_offset_mysql(self, sql_operate_mysql):
+        """Test conditional query with only offset (no limit) on MySQL"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with patch.object(sql_operate_mysql, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_mysql.read_sql_with_conditions(
+                "users", conditions, params, offset=10
+            )
+            
+            # Check MySQL requires LIMIT with large number for offset-only
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "LIMIT 10, 18446744073709551615" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_invalid_table_name(self, sql_operate_postgres):
+        """Test conditional query with invalid table name"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_conditions(
+                "invalid-table", conditions, params
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_invalid_order_by(self, sql_operate_postgres):
+        """Test conditional query with invalid order_by column"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, order_by="invalid-column"
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_invalid_order_direction(self, sql_operate_postgres):
+        """Test conditional query with invalid order direction"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, order_direction="INVALID"
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 108
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_invalid_limit(self, sql_operate_postgres):
+        """Test conditional query with invalid limit"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, limit=0
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 109
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_invalid_offset(self, sql_operate_postgres):
+        """Test conditional query with invalid offset"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_sql_with_conditions(
+                "users", conditions, params, offset=-1
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 110
+
+    @pytest.mark.asyncio
+    async def test_read_with_conditions_with_external_session(self, sql_operate_postgres):
+        """Test conditional query with external session"""
+        conditions = ["status = :status"]
+        params = {"status": "active"}
+        external_session = AsyncMock(spec=AsyncSession)
+        
+        mock_result = MagicMock()
+        mock_rows = [MagicMock(_mapping={"id": 1, "name": "John"})]
+        mock_result.fetchall.return_value = mock_rows
+        external_session.execute.return_value = mock_result
+        
+        result = await sql_operate_postgres.read_sql_with_conditions(
+            "users", conditions, params, session=external_session
+        )
+        
+        assert len(result) == 1
+        assert result[0]["name"] == "John"
+        
+        # Verify external session was used
+        external_session.execute.assert_called_once()
+        # External session should not be committed/rolled back
+        external_session.commit.assert_not_called()
+        external_session.rollback.assert_not_called()
+
+
+class TestSQLOperateGetAggregatedData:
+    """Test get_aggregated_data method"""
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_basic(self, sql_operate_postgres):
+        """Test basic aggregation query"""
+        group_by = ["department", "status"]
+        aggregations = {"count": "*", "avg_salary": "salary"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_rows = [
+                MagicMock(_mapping={"department": "Engineering", "status": "active", "count": 10, "avg_salary": 5}),
+                MagicMock(_mapping={"department": "Marketing", "status": "active", "count": 5, "avg_salary": 3}),
+            ]
+            mock_result.fetchall.return_value = mock_rows
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.get_aggregated_data(
+                "employees", group_by, aggregations
+            )
+            
+            assert len(result) == 2
+            assert result[0]["department"] == "Engineering"
+            assert result[0]["count"] == 10
+            assert result[1]["department"] == "Marketing"
+            assert result[1]["count"] == 5
+            
+            # Verify query structure
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "SELECT department, status, COUNT(*) as count, COUNT(salary) as avg_salary" in query_text
+            assert "FROM employees" in query_text
+            assert "GROUP BY department, status" in query_text
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_default_aggregation(self, sql_operate_postgres):
+        """Test aggregation with default aggregations (count only)"""
+        group_by = ["category"]
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_rows = [MagicMock(_mapping={"category": "Books", "count": 25})]
+            mock_result.fetchall.return_value = mock_rows
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.get_aggregated_data(
+                "products", group_by
+            )
+            
+            assert len(result) == 1
+            assert result[0]["category"] == "Books"
+            assert result[0]["count"] == 25
+            
+            # Verify default aggregation is used
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "COUNT(*) as count" in query_text
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_with_filters(self, sql_operate_postgres):
+        """Test aggregation with filters"""
+        group_by = ["department"]
+        aggregations = {"total": "*"}
+        filters = {"status": "active", "salary_grade": "senior"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.get_aggregated_data(
+                "employees", group_by, aggregations, filters
+            )
+            
+            # Verify WHERE clause is included
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "WHERE" in query_text
+            assert "status = :status" in query_text
+            assert "salary_grade = :salary_grade" in query_text
+            assert "GROUP BY department" in query_text
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_with_having(self, sql_operate_postgres):
+        """Test aggregation with HAVING conditions"""
+        group_by = ["department"]
+        aggregations = {"count": "*"}
+        having_conditions = ["COUNT(*) > 5", "AVG(salary) > 50000"]
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchall.return_value = []
+            mock_session.execute.return_value = mock_result
+            
+            await sql_operate_postgres.get_aggregated_data(
+                "employees", group_by, aggregations, having_conditions=having_conditions
+            )
+            
+            # Verify HAVING clause is included
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "HAVING COUNT(*) > 5 AND AVG(salary) > 50000" in query_text
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_invalid_table_name(self, sql_operate_postgres):
+        """Test aggregation with invalid table name"""
+        group_by = ["department"]
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.get_aggregated_data(
+                "invalid-table", group_by
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_invalid_group_by_field(self, sql_operate_postgres):
+        """Test aggregation with invalid group by field"""
+        group_by = ["valid_field", "invalid-field"]
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.get_aggregated_data(
+                "employees", group_by
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_invalid_aggregation_field(self, sql_operate_postgres):
+        """Test aggregation with invalid aggregation field"""
+        group_by = ["department"]
+        aggregations = {"count": "invalid-field"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            with pytest.raises(GeneralOperateException) as exc_info:
+                await sql_operate_postgres.get_aggregated_data(
+                    "employees", group_by, aggregations
+                )
+            assert exc_info.value.status_code == 400
+            assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_data_with_external_session(self, sql_operate_postgres):
+        """Test aggregation with external session"""
+        group_by = ["category"]
+        external_session = AsyncMock(spec=AsyncSession)
+        
+        mock_result = MagicMock()
+        mock_rows = [MagicMock(_mapping={"category": "Books", "count": 10})]
+        mock_result.fetchall.return_value = mock_rows
+        external_session.execute.return_value = mock_result
+        
+        result = await sql_operate_postgres.get_aggregated_data(
+            "products", group_by, session=external_session
+        )
+        
+        assert len(result) == 1
+        assert result[0]["category"] == "Books"
+        
+        # Verify external session was used
+        external_session.execute.assert_called_once()
+        # External session should not be committed/rolled back
+        external_session.commit.assert_not_called()
+        external_session.rollback.assert_not_called()
+
+
+class TestSQLOperateExecuteRawQuery:
+    """Test execute_raw_query method"""
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_fetch_all(self, sql_operate_postgres):
+        """Test raw query with fetch_all mode"""
+        query = "SELECT * FROM users WHERE age > :min_age"
+        params = {"min_age": 18}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_rows = [
+                MagicMock(_mapping={"id": 1, "name": "Alice", "age": 25}),
+                MagicMock(_mapping={"id": 2, "name": "Bob", "age": 30}),
+            ]
+            mock_result.fetchall.return_value = mock_rows
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.execute_raw_query(
+                query, params, fetch_mode="all"
+            )
+            
+            assert len(result) == 2
+            assert result[0]["name"] == "Alice"
+            assert result[1]["name"] == "Bob"
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_fetch_one(self, sql_operate_postgres):
+        """Test raw query with fetch_one mode"""
+        query = "SELECT * FROM users WHERE id = :user_id"
+        params = {"user_id": 1}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_row = MagicMock(_mapping={"id": 1, "name": "Alice", "age": 25})
+            mock_result.fetchone.return_value = mock_row
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.execute_raw_query(
+                query, params, fetch_mode="one"
+            )
+            
+            assert result["name"] == "Alice"
+            assert result["age"] == 25
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_fetch_one_no_result(self, sql_operate_postgres):
+        """Test raw query with fetch_one mode and no result"""
+        query = "SELECT * FROM users WHERE id = :user_id"
+        params = {"user_id": 999}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchone.return_value = None
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.execute_raw_query(
+                query, params, fetch_mode="one"
+            )
+            
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_fetch_none(self, sql_operate_postgres):
+        """Test raw query with fetch_none mode (e.g., for INSERT/UPDATE/DELETE)"""
+        query = "UPDATE users SET status = :status WHERE department = :dept"
+        params = {"status": "inactive", "dept": "marketing"}
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.execute_raw_query(
+                query, params, fetch_mode="none"
+            )
+            
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_no_params(self, sql_operate_postgres):
+        """Test raw query without parameters"""
+        query = "SELECT COUNT(*) as total FROM users"
+        
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_rows = [MagicMock(_mapping={"total": 42})]
+            mock_result.fetchall.return_value = mock_rows
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.execute_raw_query(query)
+            
+            assert len(result) == 1
+            assert result[0]["total"] == 42
+            
+            # Verify empty params dict was used
+            call_args = mock_session.execute.call_args[0]
+            assert call_args[1] == {}  # Empty params dict
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_invalid_fetch_mode(self, sql_operate_postgres):
+        """Test raw query with invalid fetch mode"""
+        query = "SELECT * FROM users"
+        
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.execute_raw_query(
+                query, fetch_mode="invalid"
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 111
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_query_with_external_session(self, sql_operate_postgres):
+        """Test raw query with external session"""
+        query = "SELECT * FROM users LIMIT 1"
+        external_session = AsyncMock(spec=AsyncSession)
+        
+        mock_result = MagicMock()
+        mock_rows = [MagicMock(_mapping={"id": 1, "name": "Alice"})]
+        mock_result.fetchall.return_value = mock_rows
+        external_session.execute.return_value = mock_result
+        
+        result = await sql_operate_postgres.execute_raw_query(
+            query, session=external_session
+        )
+        
+        assert len(result) == 1
+        assert result[0]["name"] == "Alice"
+        
+        # Verify external session was used
+        external_session.execute.assert_called_once()
+        # External session should not be committed/rolled back
+        external_session.commit.assert_not_called()
+        external_session.rollback.assert_not_called()
+
+
+class TestSQLOperateReadOne:
+    """Test read_one method"""
+
+    @pytest.mark.asyncio
+    async def test_read_one_found(self, sql_operate_postgres):
+        """Test read_one when record is found"""
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_row = MagicMock(_mapping={"id": 1, "name": "Alice", "email": "alice@example.com"})
+            mock_result.fetchone.return_value = mock_row
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.read_one("users", 1)
+            
+            assert result["id"] == 1
+            assert result["name"] == "Alice"
+            assert result["email"] == "alice@example.com"
+            
+            # Verify query structure
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "SELECT * FROM users WHERE id = :id_value" in query_text
+            assert call_args[1] == {"id_value": 1}
+
+    @pytest.mark.asyncio
+    async def test_read_one_not_found(self, sql_operate_postgres):
+        """Test read_one when record is not found"""
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_result.fetchone.return_value = None
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.read_one("users", 999)
+            
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_read_one_custom_id_column(self, sql_operate_postgres):
+        """Test read_one with custom ID column"""
+        with patch.object(sql_operate_postgres, "create_external_session") as mock_session_ctx:
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            
+            mock_result = MagicMock()
+            mock_row = MagicMock(_mapping={"uuid": "abc123", "name": "Bob"})
+            mock_result.fetchone.return_value = mock_row
+            mock_session.execute.return_value = mock_result
+            
+            result = await sql_operate_postgres.read_one(
+                "users", "abc123", id_column="uuid"
+            )
+            
+            assert result["uuid"] == "abc123"
+            assert result["name"] == "Bob"
+            
+            # Verify custom ID column is used
+            call_args = mock_session.execute.call_args[0]
+            query_text = str(call_args[0])
+            assert "SELECT * FROM users WHERE uuid = :id_value" in query_text
+
+    @pytest.mark.asyncio
+    async def test_read_one_invalid_table_name(self, sql_operate_postgres):
+        """Test read_one with invalid table name"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_one("invalid-table", 1)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_one_invalid_id_column(self, sql_operate_postgres):
+        """Test read_one with invalid ID column name"""
+        with pytest.raises(GeneralOperateException) as exc_info:
+            await sql_operate_postgres.read_one(
+                "users", 1, id_column="invalid-column"
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.message_code == 102
+
+    @pytest.mark.asyncio
+    async def test_read_one_with_external_session(self, sql_operate_postgres):
+        """Test read_one with external session"""
+        external_session = AsyncMock(spec=AsyncSession)
+        
+        mock_result = MagicMock()
+        mock_row = MagicMock(_mapping={"id": 1, "name": "Alice"})
+        mock_result.fetchone.return_value = mock_row
+        external_session.execute.return_value = mock_result
+        
+        result = await sql_operate_postgres.read_one(
+            "users", 1, session=external_session
+        )
+        
+        assert result["id"] == 1
+        assert result["name"] == "Alice"
+        
+        # Verify external session was used
+        external_session.execute.assert_called_once()
+        # External session should not be committed/rolled back
+        external_session.commit.assert_not_called()
+        external_session.rollback.assert_not_called()

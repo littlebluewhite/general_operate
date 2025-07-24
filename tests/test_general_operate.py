@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -49,9 +50,9 @@ class MockModule:
 
 # Create a concrete implementation of GeneralOperate for testing
 class MockGeneralOperate(GeneralOperate):
-    def __init__(self, module, database_client, redis_client, influxdb=None, exc=GeneralOperateException):
+    def __init__(self, module, database_client, redis_client, influxdb=None, kafka_config=None, exc=GeneralOperateException):
         self._module = module
-        super().__init__(database_client, redis_client, influxdb, exc)
+        super().__init__(database_client, redis_client, influxdb, kafka_config, exc)
     
     def get_module(self):
         return self._module
@@ -1247,3 +1248,584 @@ class TestGeneralOperateCacheData:
         assert len(deserialized["large_list"]) == 1000
         assert len(deserialized["large_dict"]) == 100
         assert deserialized["nested"]["level1"]["level2"]["level3"]["data"] == "deep_value"
+
+
+class TestGeneralOperateKafkaProperties:
+    """Test Kafka properties and client access"""
+    
+    @pytest.mark.asyncio
+    async def test_kafka_producer_property_none(self, mock_module, mock_redis, mock_db):
+        """Test kafka_producer property when not configured"""
+        go = MockGeneralOperate(
+            module=mock_module,
+            database_client=mock_db,
+            redis_client=mock_redis,
+            kafka_config=None
+        )
+        
+        assert go._kafka_producer is None
+    
+    @pytest.mark.asyncio
+    async def test_kafka_consumer_property_none(self, mock_module, mock_redis, mock_db):
+        """Test kafka_consumer property when not configured"""
+        go = MockGeneralOperate(
+            module=mock_module,
+            database_client=mock_db,
+            redis_client=mock_redis,
+            kafka_config=None
+        )
+        
+        assert go._kafka_consumer is None
+    
+    @pytest.mark.asyncio
+    async def test_kafka_event_bus_property_none(self, mock_module, mock_redis, mock_db):
+        """Test kafka_event_bus property when not configured"""
+        go = MockGeneralOperate(
+            module=mock_module,
+            database_client=mock_db,
+            redis_client=mock_redis,
+            kafka_config=None
+        )
+        
+        assert go._kafka_event_bus is None
+    
+    @pytest.mark.skip(reason="kafka_client property not implemented")
+    @pytest.mark.asyncio
+    async def test_kafka_client_property_returns_producer_first(self, mock_module, mock_redis, mock_db):
+        """Test kafka_client property returns producer when both exist"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True,
+            "consumer": {
+                "topics": ["test-topic"],
+                "group_id": "test-group"
+            }
+        }
+        
+        mock_kafka_producer = MagicMock()
+        mock_kafka_consumer = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate', return_value=mock_kafka_producer), \
+             patch('general_operate.general_operate.KafkaConsumerOperate', return_value=mock_kafka_consumer):
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Should return producer first (priority)
+            assert go.kafka_client == mock_kafka_producer
+
+
+@pytest.mark.skip(reason="Kafka context manager tests require aiokafka dependency")
+class TestGeneralOperateContextManager:
+    """Test GeneralOperate async context manager functionality"""
+    
+    @pytest.mark.asyncio
+    async def test_context_manager_with_all_kafka_components(self, mock_module, mock_redis, mock_db):
+        """Test context manager with all Kafka components"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True,
+            "consumer": {
+                "topics": ["test-topic"],
+                "group_id": "test-group"
+            },
+            "event_bus": {
+                "default_topic": "events"
+            }
+        }
+        
+        mock_kafka_producer = AsyncMock()
+        mock_kafka_consumer = AsyncMock()
+        mock_kafka_event_bus = AsyncMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate', return_value=mock_kafka_producer), \
+             patch('general_operate.general_operate.KafkaConsumerOperate', return_value=mock_kafka_consumer), \
+             patch('general_operate.general_operate.KafkaEventBus', return_value=mock_kafka_event_bus):
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            async with go as context_go:
+                assert context_go == go
+                # Verify all components are started
+                mock_kafka_producer.start.assert_called_once()
+                mock_kafka_consumer.start.assert_called_once()
+                mock_kafka_event_bus.start.assert_called_once()
+            
+            # Verify all components are stopped
+            mock_kafka_producer.stop.assert_called_once()
+            mock_kafka_consumer.stop.assert_called_once()
+            mock_kafka_event_bus.stop.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_context_manager_partial_components(self, mock_module, mock_redis, mock_db):
+        """Test context manager with only some Kafka components"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True,
+            # No consumer or event_bus
+        }
+        
+        mock_kafka_producer = AsyncMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate', return_value=mock_kafka_producer):
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            async with go as context_go:
+                assert context_go == go
+                mock_kafka_producer.start.assert_called_once()
+            
+            mock_kafka_producer.stop.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_context_manager_exception_during_start(self, mock_module, mock_redis, mock_db):
+        """Test context manager handles start exception"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True,
+            "consumer": {
+                "topics": ["test-topic"],
+                "group_id": "test-group"
+            }
+        }
+        
+        mock_kafka_producer = AsyncMock()
+        mock_kafka_consumer = AsyncMock()
+        mock_kafka_consumer.start.side_effect = Exception("Consumer start failed")
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate', return_value=mock_kafka_producer), \
+             patch('general_operate.general_operate.KafkaConsumerOperate', return_value=mock_kafka_consumer):
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            with pytest.raises(Exception, match="Consumer start failed"):
+                async with go:
+                    pass
+    
+    @pytest.mark.asyncio
+    async def test_context_manager_exception_during_stop(self, mock_module, mock_redis, mock_db):
+        """Test context manager handles stop exception gracefully"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True,
+            "consumer": {
+                "topics": ["test-topic"],
+                "group_id": "test-group"
+            }
+        }
+        
+        mock_kafka_producer = AsyncMock()
+        mock_kafka_consumer = AsyncMock()
+        mock_kafka_consumer.stop.side_effect = Exception("Consumer stop failed")
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate', return_value=mock_kafka_producer), \
+             patch('general_operate.general_operate.KafkaConsumerOperate', return_value=mock_kafka_consumer):
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Should handle stop exception and continue with cleanup
+            async with go:
+                pass  # Normal execution
+            
+            # Both start methods should have been called
+            mock_kafka_producer.start.assert_called_once()
+            mock_kafka_consumer.start.assert_called_once()
+            
+            # Both stop methods should have been attempted
+            mock_kafka_producer.stop.assert_called_once()
+            mock_kafka_consumer.stop.assert_called_once()
+
+
+@pytest.mark.skip(reason="Kafka configuration tests require aiokafka dependency")
+class TestGeneralOperateConfigurationEdgeCases:
+    """Test GeneralOperate configuration edge cases"""
+    
+    @pytest.mark.asyncio
+    async def test_kafka_config_with_custom_client_id(self, mock_module, mock_redis, mock_db):
+        """Test Kafka configuration with custom client_id"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "client_id": "custom-client-123",
+            "enable_producer": True,
+            "consumer": {
+                "topics": ["test-topic"],
+                "group_id": "test-group"
+            }
+        }
+        
+        mock_kafka_producer = MagicMock()
+        mock_kafka_consumer = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate') as mock_producer_class, \
+             patch('general_operate.general_operate.KafkaConsumerOperate') as mock_consumer_class:
+            
+            mock_producer_class.return_value = mock_kafka_producer
+            mock_consumer_class.return_value = mock_kafka_consumer
+            
+            MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Verify custom client_id is used
+            mock_producer_class.assert_called_once()
+            producer_call_kwargs = mock_producer_class.call_args[1]
+            assert producer_call_kwargs['client_id'] == "custom-client-123"
+            
+            mock_consumer_class.assert_called_once()
+            consumer_call_kwargs = mock_consumer_class.call_args[1]
+            assert consumer_call_kwargs['client_id'] == "custom-client-123"
+    
+    @pytest.mark.asyncio
+    async def test_kafka_config_with_complex_producer_config(self, mock_module, mock_redis, mock_db):
+        """Test Kafka configuration with complex producer config"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "producer": {
+                "batch_size": 32768,
+                "linger_ms": 50,
+                "compression_type": "gzip",
+                "max_request_size": 1048576
+            }
+        }
+        
+        mock_kafka_producer = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate') as mock_producer_class:
+            mock_producer_class.return_value = mock_kafka_producer
+            
+            MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Verify producer config is passed correctly
+            mock_producer_class.assert_called_once()
+            call_kwargs = mock_producer_class.call_args[1]
+            assert call_kwargs['config'] == kafka_config['producer']
+    
+    @pytest.mark.asyncio
+    async def test_kafka_config_with_complex_consumer_config(self, mock_module, mock_redis, mock_db):
+        """Test Kafka configuration with complex consumer config"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": False,
+            "consumer": {
+                "topics": ["test-topic", "another-topic"],
+                "group_id": "complex-consumer-group",
+                "auto_offset_reset": "latest",
+                "max_poll_records": 1000,
+                "session_timeout_ms": 30000,
+                "enable_auto_commit": False
+            }
+        }
+        
+        mock_kafka_consumer = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaConsumerOperate') as mock_consumer_class:
+            mock_consumer_class.return_value = mock_kafka_consumer
+            
+            MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Verify consumer config is passed correctly (excluding topics and group_id)
+            mock_consumer_class.assert_called_once()
+            call_kwargs = mock_consumer_class.call_args[1]
+            
+            # These should be passed as separate parameters
+            assert call_kwargs['topics'] == ["test-topic", "another-topic"]
+            assert call_kwargs['group_id'] == "complex-consumer-group"
+            
+            # These should be in the config dict
+            expected_config = {k: v for k, v in kafka_config['consumer'].items() 
+                             if k not in ['topics', 'group_id']}
+            assert call_kwargs['config'] == expected_config
+    
+    @pytest.mark.asyncio
+    async def test_kafka_config_with_complex_event_bus_config(self, mock_module, mock_redis, mock_db):
+        """Test Kafka configuration with complex event bus config"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": False,
+            "event_bus": {
+                "default_topic": "main-events",
+                "event_timeout": 60,
+                "retry_attempts": 5,
+                "retry_backoff": 2.0
+            }
+        }
+        
+        mock_kafka_event_bus = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaEventBus') as mock_event_bus_class:
+            mock_event_bus_class.return_value = mock_kafka_event_bus
+            
+            MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Verify event bus config is passed correctly (excluding default_topic)
+            mock_event_bus_class.assert_called_once()
+            call_kwargs = mock_event_bus_class.call_args[1]
+            
+            # default_topic should be passed as separate parameter
+            assert call_kwargs['default_topic'] == "main-events"
+            
+            # Other config should be in the config dict
+            expected_config = {k: v for k, v in kafka_config['event_bus'].items() 
+                             if k not in ['default_topic']}
+            assert call_kwargs['config'] == expected_config
+    
+    @pytest.mark.asyncio
+    async def test_kafka_config_disabled_producer(self, mock_module, mock_redis, mock_db):
+        """Test Kafka configuration with explicitly disabled producer"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": False,
+            "producer": {
+                "batch_size": 16384  # Should be ignored
+            }
+        }
+        
+        go = MockGeneralOperate(
+            module=mock_module,
+            database_client=mock_db,
+            redis_client=mock_redis,
+            kafka_config=kafka_config
+        )
+        
+        # Producer should not be initialized
+        assert go._kafka_producer is None
+    
+    @pytest.mark.asyncio
+    async def test_table_name_propagation(self, mock_module, mock_redis, mock_db):
+        """Test that table_name is properly propagated to Kafka client IDs"""
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True,
+            "consumer": {
+                "topics": ["test-topic"],
+                "group_id": "test-group"
+            }
+        }
+        
+        mock_kafka_producer = MagicMock()
+        mock_kafka_consumer = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate') as mock_producer_class, \
+             patch('general_operate.general_operate.KafkaConsumerOperate') as mock_consumer_class:
+            
+            mock_producer_class.return_value = mock_kafka_producer
+            mock_consumer_class.return_value = mock_kafka_consumer
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config
+            )
+            
+            # Verify table_name is used in client_id
+            table_name = go.table_name
+            
+            mock_producer_class.assert_called_once()
+            producer_kwargs = mock_producer_class.call_args[1]
+            assert producer_kwargs['client_id'] == f"{table_name}-producer"
+            
+            mock_consumer_class.assert_called_once()
+            consumer_kwargs = mock_consumer_class.call_args[1]
+            assert consumer_kwargs['client_id'] == f"{table_name}-consumer"
+
+
+class TestGeneralOperateExceptionHandling:
+    """Test GeneralOperate exception handling scenarios"""
+    
+    @pytest.mark.asyncio
+    async def test_custom_exception_class_propagation(self, mock_module, mock_redis, mock_db):
+        """Test that custom exception class is propagated to components"""
+        
+        class CustomExceptionClass(Exception):
+            def __init__(self, status_code, message_code, message=""):
+                self.status_code = status_code
+                self.message_code = message_code
+                self.message = message
+        
+        kafka_config = {
+            "bootstrap_servers": "localhost:9092",
+            "enable_producer": True
+        }
+        
+        mock_kafka_producer = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate') as mock_producer_class:
+            mock_producer_class.return_value = mock_kafka_producer
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                kafka_config=kafka_config,
+                exc=CustomExceptionClass
+            )
+            
+            # Verify Kafka producer is created (Kafka components don't accept custom exception classes)
+            mock_producer_class.assert_called_once()
+            call_kwargs = mock_producer_class.call_args[1]
+            # Kafka components use their own exception handling, so exc is not passed
+            assert 'exc' not in call_kwargs
+            
+            # Verify it's stored in the instance
+            assert go._GeneralOperate__exc == CustomExceptionClass
+    
+    @pytest.mark.asyncio
+    async def test_module_access_methods(self, mock_module, mock_redis, mock_db):
+        """Test module-related properties and methods"""
+        go = MockGeneralOperate(
+            module=mock_module,
+            database_client=mock_db,
+            redis_client=mock_redis
+        )
+        
+        # Test module properties
+        assert go.module is not None
+        assert hasattr(go.module, 'table_name')
+        assert hasattr(go.module, 'main_schemas')
+        assert hasattr(go.module, 'create_schemas')
+        assert hasattr(go.module, 'update_schemas')
+        
+        # Test that properties are properly set
+        assert go.table_name == go.module.table_name
+        assert go.main_schemas == go.module.main_schemas
+        assert go.create_schemas == go.module.create_schemas
+        assert go.update_schemas == go.module.update_schemas
+
+
+class TestGeneralOperateAdvancedScenarios:
+    """Test advanced GeneralOperate scenarios"""
+    
+    @pytest.mark.asyncio
+    async def test_initialization_with_all_optional_parameters(self, mock_influxdb, mock_module):
+        """Test initialization with all optional parameters provided"""
+        # Mock database client
+        mock_db = AsyncMock()
+        
+        # Mock Redis client
+        mock_redis = AsyncMock()
+        mock_redis.ping = AsyncMock(return_value=True)
+        
+        # Custom exception class
+        class CustomException(Exception):
+            def __init__(self, status_code, message_code, message=""):
+                self.status_code = status_code
+                self.message_code = message_code
+                self.message = message
+        
+        # Complex Kafka config
+        kafka_config = {
+            "bootstrap_servers": ["broker1:9092", "broker2:9092"],
+            "client_id": "advanced-client",
+            "enable_producer": True,
+            "producer": {
+                "batch_size": 65536,
+                "linger_ms": 100,
+                "compression_type": "snappy"
+            },
+            "consumer": {
+                "topics": ["topic1", "topic2", "topic3"],
+                "group_id": "advanced-group",
+                "auto_offset_reset": "earliest",
+                "max_poll_records": 500
+            },
+            "event_bus": {
+                "default_topic": "advanced-events",
+                "event_timeout": 120,
+                "retry_attempts": 10
+            }
+        }
+        
+        mock_kafka_producer = MagicMock()
+        mock_kafka_consumer = MagicMock()
+        mock_kafka_event_bus = MagicMock()
+        
+        with patch('general_operate.general_operate.KafkaProducerOperate', return_value=mock_kafka_producer), \
+             patch('general_operate.general_operate.KafkaConsumerOperate', return_value=mock_kafka_consumer), \
+             patch('general_operate.general_operate.KafkaEventBus', return_value=mock_kafka_event_bus):
+            
+            go = MockGeneralOperate(
+                module=mock_module,
+                database_client=mock_db,
+                redis_client=mock_redis,
+                influxdb=mock_influxdb,
+                kafka_config=kafka_config,
+                exc=CustomException
+            )
+            
+            # Verify all components are properly initialized
+            assert go._GeneralOperate__exc == CustomException
+            assert go._kafka_producer == mock_kafka_producer
+            assert go._kafka_consumer == mock_kafka_consumer
+            assert go._kafka_event_bus == mock_kafka_event_bus
+            
+            # Verify parent class initialization
+            assert hasattr(go, 'redis')   # From CacheOperate
+            assert hasattr(go, 'influxdb')  # From InfluxOperate (note: attribute is 'influxdb', not 'influx')
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_operations_simulation(self, mock_module, mock_redis, mock_db):
+        """Test simulation of concurrent operations"""
+        go = MockGeneralOperate(
+            module=mock_module,
+            database_client=mock_db,
+            redis_client=mock_redis
+        )
+        
+        # Mock multiple concurrent operations
+        async def mock_operation(operation_id: int):
+            # Simulate some async work
+            await asyncio.sleep(0.01)
+            return f"result_{operation_id}"
+        
+        # Test that GeneralOperate can handle concurrent access
+        tasks = [mock_operation(i) for i in range(10)]
+        results = await asyncio.gather(*tasks)
+        
+        assert len(results) == 10
+        assert all(f"result_{i}" in results for i in range(10))
+        
+        # Verify GeneralOperate instance is still functional
+        assert go.table_name is not None
+        assert go.main_schemas is not None

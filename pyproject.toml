@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn>=0.35.0",
     "termine>=0.1.5",
     "hatchling>=1.27.0",
+    "aiokafka>=0.12.0",
     "structlog>=25.4.0",
 ]
 
@@ -120,10 +121,13 @@ warn_unused_ignores = true
 minversion = "8.0"
 addopts = "-ra -q --strict-markers --strict-config"
 testpaths = ["tests"]
-markers = ["asyncio: marks tests as async"]
+markers = [
+    "asyncio: marks tests as async",
+    "integration: marks tests as integration tests"
+]
 
 [tool.coverage.run]
-source = ["general_operator"]
+source = ["general_operate"]
 omit = ["*/tests/*", "*/test_*"]
 
 [tool.coverage.report]
@@ -143,4 +147,5 @@ exclude_lines = [
 [dependency-groups]
 dev = [
     "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.2.1",
 ]

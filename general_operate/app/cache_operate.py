@@ -1,5 +1,8 @@
+import asyncio
+import functools
 import json
 import random
+import re
 from datetime import datetime, UTC
 from typing import Any
 import structlog
@@ -7,17 +10,109 @@ import structlog
 import redis
 from redis import RedisError
 
-from ..utils.exception import GeneralOperateException
+from ..core.exceptions import CacheException, ErrorCode, ErrorContext
 
 
 class CacheOperate:
-    def __init__(self, redis_db: redis.asyncio.Redis, exc=GeneralOperateException):
+    def __init__(self, redis_db: redis.asyncio.Redis):
         self.redis = redis_db
-        self.__exc = exc
+        self.__exc = CacheException
 
         self.logger = structlog.get_logger().bind(
             operator=self.__class__.__name__
         )
+
+    @staticmethod
+    def exception_handler(func):
+        """Exception handler decorator for GeneralOperate methods"""
+        def handle_exceptions(self, e):
+            """Common exception handling logic"""
+            # redis error
+            if isinstance(e, redis.ConnectionError):
+                raise self.__exc(
+                    code=ErrorCode.CACHE_CONNECTION_ERROR,
+                    message=f"Redis connection error: {str(e)}",
+                    context=ErrorContext(operation="cache_operation", resource="redis"),
+                    cause=e
+                )
+            elif isinstance(e, redis.TimeoutError):
+                raise self.__exc(
+                    code=ErrorCode.CACHE_CONNECTION_ERROR,
+                    message=f"Redis timeout error: {str(e)}",
+                    context=ErrorContext(operation="cache_operation", resource="redis", details={"error_type": "timeout"}),
+                    cause=e
+                )
+            elif isinstance(e, redis.ResponseError):
+                raise self.__exc(
+                    code=ErrorCode.CACHE_KEY_ERROR,
+                    message=f"Redis response error: {str(e)}",
+                    context=ErrorContext(operation="cache_operation", resource="redis", details={"error_type": "response"}),
+                    cause=e
+                )
+            elif isinstance(e, RedisError):
+                error_message = str(e)
+                pattern = r"Error (\d+)"
+                match = re.search(pattern, error_message)
+                details = {"error_type": "redis_general"}
+                if match:
+                    details["redis_error_code"] = match.group(1)
+                
+                raise self.__exc(
+                    code=ErrorCode.CACHE_CONNECTION_ERROR,
+                    message=f"Redis error: {error_message}",
+                    context=ErrorContext(operation="cache_operation", resource="redis", details=details),
+                    cause=e
+                )
+            # decode error
+            elif isinstance(e, json.JSONDecodeError):
+                raise self.__exc(
+                    code=ErrorCode.CACHE_SERIALIZATION_ERROR,
+                    message=f"JSON decode error: {str(e)}",
+                    context=ErrorContext(operation="cache_operation", resource="redis", details={"error_type": "json_decode"}),
+                    cause=e
+                )
+            elif isinstance(e, (ValueError, TypeError, AttributeError)) and "SQL" in str(e):
+                # Data validation or SQL-related errors
+                raise self.__exc(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=f"SQL operation validation error: {str(e)}",
+                    context=ErrorContext(operation="cache_operation", resource="redis", details={"error_type": "sql_validation"}),
+                    cause=e
+                )
+            elif isinstance(e, self.__exc):
+                # If it's already a GeneralOperateException, raise it directly
+                raise e
+            else:
+                # For truly unexpected exceptions
+                raise self.__exc(
+                    code=ErrorCode.UNKNOWN_ERROR,
+                    message=f"Operation error: {str(e)}",
+                    context=ErrorContext(operation="cache_operation", resource="redis", details={"error_type": "unexpected"}),
+                    cause=e
+                )
+        @functools.wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            try:
+                return await func(self, *args, **kwargs)
+            except Exception as e:
+                # Log unexpected exceptions with full details
+                self.logger.error(f"Unexpected error in {func.__name__}: {type(e).__name__}: {str(e)}", exc_info=True)
+                handle_exceptions(self, e)
+
+        @functools.wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except Exception as e:
+                # For other exceptions, return self.__exc instance
+                handle_exceptions(self, e)
+
+        # Return appropriate wrapper based on function type
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        else:
+            return sync_wrapper
+
 
     async def get_caches(self, prefix: str, identifiers: set[str]) -> list[dict[str, Any]]:
         keys = [f"{prefix}:{identifier}" for identifier in identifiers]
@@ -113,7 +208,7 @@ class CacheOperate:
         serialized_data = json.dumps(enriched_data, ensure_ascii=False)
         # 儲存到 Redis
         set_ttl = ttl_seconds if ttl_seconds else random.randint(2000, 5000)
-        return (key, set_ttl, serialized_data)
+        return key, set_ttl, serialized_data
 
     async def delete_caches(self, prefix: str, identifiers: set[str]) -> int:
         if not identifiers:

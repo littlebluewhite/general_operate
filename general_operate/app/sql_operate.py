@@ -1,19 +1,25 @@
+import asyncio
+import functools
+import json
 import re
 from typing import Any
+import structlog
 
 import asyncpg
 import pymysql
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import UnmappedInstanceError
 
 from ..app.client.database import SQLClient
-from ..utils.exception import GeneralOperateException
+from ..core.exceptions import DatabaseException, ErrorCode, ErrorContext
 
 
 class SQLOperate:
-    def __init__(self, client: SQLClient, exc=GeneralOperateException):
-        self.__exc = exc
+    def __init__(self, client: SQLClient):
+        self.__exc = DatabaseException
         self.__sqlClient = client
         self.null_set = {-999999, "null"}
 
@@ -22,6 +28,103 @@ class SQLOperate:
 
         # Detect database type for compatibility
         self._is_postgresql = client.engine_type.lower() == "postgresql"
+        
+        # Initialize logger
+        self.logger = structlog.get_logger().bind(
+            operator=self.__class__.__name__
+        )
+
+
+    @staticmethod
+    def exception_handler(func):
+        """Exception handler decorator for GeneralOperate methods"""
+        def handle_exceptions(self, e):
+            """Common exception handling logic"""
+            # decode error
+            if isinstance(e, json.JSONDecodeError):
+                raise self.__exc(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=f"JSON decode error: {str(e)}",
+                    context=ErrorContext(operation="sql_operation", resource="database", details={"error_type": "json_decode"}),
+                    cause=e
+                )
+            elif isinstance(e, DBAPIError):
+                if isinstance(e.orig, AsyncAdapt_asyncpg_dbapi.Error):
+                    pg_error = e.orig
+                    message = str(pg_error).replace("\n", " ").replace("\r", " ").split(': ', 1)[1]
+                    sqlstate = getattr(pg_error, "sqlstate", "1") or "1"
+                    raise self.__exc(
+                        code=ErrorCode.DB_QUERY_ERROR,
+                        message=message,
+                        context=ErrorContext(operation="sql_operation", resource="postgresql", details={"sqlstate": sqlstate}),
+                        cause=e
+                    )
+                elif isinstance(e.orig, pymysql.Error):
+                    mysql_code, msg = e.orig.args
+                    raise self.__exc(
+                        code=ErrorCode.DB_QUERY_ERROR,
+                        message=msg,
+                        context=ErrorContext(operation="sql_operation", resource="mysql", details={"mysql_error_code": mysql_code}),
+                        cause=e
+                    )
+                else:
+                    # Generic database error handling
+                    message = str(e).replace("\n", " ").replace("\r", " ")
+                    raise self.__exc(
+                        code=ErrorCode.DB_QUERY_ERROR,
+                        message=message,
+                        context=ErrorContext(operation="sql_operation", resource="database", details={"error_type": "generic_db"}),
+                        cause=e
+                    )
+            elif isinstance(e, UnmappedInstanceError):
+                raise self.__exc(
+                    code=ErrorCode.DB_QUERY_ERROR,
+                    message="id: one or more of ids is not exist",
+                    context=ErrorContext(operation="sql_operation", resource="database", details={"error_type": "unmapped_instance"}),
+                    cause=e
+                )
+            elif isinstance(e, (ValueError, TypeError, AttributeError)) and "SQL" in str(e):
+                # Data validation or SQL-related errors
+                raise self.__exc(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=f"SQL operation validation error: {str(e)}",
+                    context=ErrorContext(operation="sql_operation", resource="database", details={"error_type": "sql_validation"}),
+                    cause=e
+                )
+            elif isinstance(e, self.__exc):
+                # If it's already a GeneralOperateException, raise it directly
+                raise e
+            else:
+                # For truly unexpected exceptions
+                raise self.__exc(
+                    code=ErrorCode.UNKNOWN_ERROR,
+                    message=f"Operation error: {str(e)}",
+                    context=ErrorContext(operation="sql_operation", resource="database", details={"error_type": "unexpected"}),
+                    cause=e
+                )
+        @functools.wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            try:
+                return await func(self, *args, **kwargs)
+            except Exception as e:
+                # Log unexpected exceptions with full details
+                self.logger.error(f"Unexpected error in {func.__name__}: {type(e).__name__}: {str(e)}", exc_info=True)
+                handle_exceptions(self, e)
+
+        @functools.wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except Exception as e:
+                # For other exceptions, return self.__exc instance
+                handle_exceptions(self, e)
+
+        # Return appropriate wrapper based on function type
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        else:
+            return sync_wrapper
+
 
     def _validate_identifier(
             self, identifier: str, identifier_type: str = "identifier"
@@ -29,23 +132,23 @@ class SQLOperate:
         """Validate SQL identifiers (table names, column names) to prevent SQL injection"""
         if not identifier or not isinstance(identifier, str):
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.VALIDATION_ERROR,
                 message=f"Invalid {identifier_type}: must be a non-empty string",
-                message_code=100,
+                context=ErrorContext(operation="validate_identifier", details={"identifier_type": identifier_type})
             )
 
         if len(identifier) > 64:  # Standard SQL identifier length limit
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.VALIDATION_ERROR,
                 message=f"Invalid {identifier_type}: too long (max 64 characters)",
-                message_code=101,
+                context=ErrorContext(operation="validate_identifier", details={"identifier_type": identifier_type, "length": len(identifier)})
             )
 
         if not self._valid_identifier_pattern.match(identifier):
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.VALIDATION_ERROR,
                 message=f"Invalid {identifier_type}: contains invalid characters",
-                message_code=102,
+                context=ErrorContext(operation="validate_identifier", details={"identifier_type": identifier_type, "identifier": identifier})
             )
 
     def _validate_data_value(self, value: Any, column_name: str) -> None:
@@ -69,17 +172,18 @@ class SQLOperate:
                 json.dumps(value)  # Test if it can be serialized
             except (TypeError, ValueError) as e:
                 raise self.__exc(
-                    status_code=400,
+                    code=ErrorCode.VALIDATION_ERROR,
                     message=f"Value for column '{column_name}' contains non-serializable data: {e}",
-                    message_code=108,
+                    context=ErrorContext(operation="validate_data_value", details={"column_name": column_name}),
+                    cause=e
                 )
 
         # Check for extremely long strings that might cause issues
         if isinstance(value, str) and len(value) > 65535:  # TEXT field limit in MySQL
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.VALIDATION_ERROR,
                 message=f"Value for column '{column_name}' is too long (max 65535 characters)",
-                message_code=103,
+                context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "length": len(value)})
             )
 
         # Check for potentially dangerous SQL keywords in string values
@@ -103,18 +207,18 @@ class SQLOperate:
             for pattern in dangerous_patterns:
                 if pattern in lower_value:
                     raise self.__exc(
-                        status_code=400,
+                        code=ErrorCode.VALIDATION_ERROR,
                         message=f"Value for column '{column_name}' contains potentially dangerous SQL characters",
-                        message_code=104,
+                        context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "pattern": pattern})
                     )
 
             # Check for SQL injection patterns (more specific)
             for keyword in sql_keywords:
                 if keyword in lower_value:
                     raise self.__exc(
-                        status_code=400,
+                        code=ErrorCode.VALIDATION_ERROR,
                         message=f"Value for column '{column_name}' contains potentially dangerous SQL keywords",
-                        message_code=104,
+                        context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "keyword": keyword})
                     )
 
     def _validate_data_dict(
@@ -125,18 +229,10 @@ class SQLOperate:
     ) -> dict[str, Any]:
         """Validate a data dictionary for database operations"""
         if not isinstance(data, dict):
-            raise self.__exc(
-                status_code=400,
-                message=f"Data for {operation} must be a dictionary",
-                message_code=105,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Data for {operation} must be a dictionary", context=ErrorContext(operation="validation"))
 
         if not data and not allow_empty:
-            raise self.__exc(
-                status_code=400,
-                message=f"Data for {operation} cannot be empty",
-                message_code=106,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Data for {operation} cannot be empty", context=ErrorContext(operation="validation"))
 
         validated_data = {}
         for key, value in data.items():
@@ -164,11 +260,7 @@ class SQLOperate:
                     validated_data[key] = value
 
         if not validated_data and not allow_empty:
-            raise self.__exc(
-                status_code=400,
-                message=f"No valid data provided for {operation}",
-                message_code=107,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"No valid data provided for {operation}", context=ErrorContext(operation="validation"))
         return validated_data
 
     def create_external_session(self) -> AsyncSession:
@@ -253,11 +345,7 @@ class SQLOperate:
         elif isinstance(data, list):
             data_list = data
         else:
-            raise self.__exc(
-                status_code=400,
-                message="Data must be a dictionary or list of dictionaries",
-                message_code=114,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="Data must be a dictionary or list of dictionaries", context=ErrorContext(operation="validation"))
 
         if not data_list:
             return []
@@ -266,11 +354,7 @@ class SQLOperate:
         cleaned_data_list = []
         for idx, item in enumerate(data_list):
             if not isinstance(item, dict):
-                raise self.__exc(
-                    status_code=400,
-                    message=f"Item at index {idx} must be a dictionary",
-                    message_code=115,
-                )
+                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Item at index {idx} must be a dictionary", context=ErrorContext(operation="validation"))
 
             try:
                 cleaned_data = self._validate_data_dict(
@@ -279,11 +363,7 @@ class SQLOperate:
                 cleaned_data_list.append(cleaned_data)
             except Exception as e:
                 # Re-raise with more context
-                raise self.__exc(
-                    status_code=400,
-                    message=f"Invalid data at index {idx}: {str(e)}",
-                    message_code=113,
-                )
+                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Invalid data at index {idx}: {str(e)}", context=ErrorContext(operation="validation"))
 
         if not cleaned_data_list:
             return []
@@ -394,24 +474,14 @@ class SQLOperate:
 
         # Validate order direction
         if order_direction.upper() not in ["ASC", "DESC"]:
-            raise self.__exc(
-                status_code=400,
-                message="order_direction must be 'ASC' or 'DESC'",
-                message_code=108,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="order_direction must be 'ASC' or 'DESC'", context=ErrorContext(operation="validation"))
 
         # Validate pagination parameters
         if limit is not None and limit <= 0:
-            raise self.__exc(
-                status_code=400,
-                message="limit must be a positive integer",
-                message_code=109,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="limit must be a positive integer", context=ErrorContext(operation="validation"))
 
         if offset < 0:
-            raise self.__exc(
-                status_code=400, message="offset must be non-negative", message_code=110
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="offset must be non-negative", context=ErrorContext(operation="validation"))
 
         # Helper function to execute the actual SQL operations
         async def _execute_read(active_session: AsyncSession) -> list[dict[str, Any]]:
@@ -497,23 +567,13 @@ class SQLOperate:
             self._validate_identifier(order_by, "order_by column name")
 
         if order_direction.upper() not in ["ASC", "DESC"]:
-            raise self.__exc(
-                status_code=400,
-                message="order_direction must be 'ASC' or 'DESC'",
-                message_code=108,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="order_direction must be 'ASC' or 'DESC'", context=ErrorContext(operation="validation"))
 
         if limit is not None and limit <= 0:
-            raise self.__exc(
-                status_code=400,
-                message="limit must be a positive integer",
-                message_code=109,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="limit must be a positive integer", context=ErrorContext(operation="validation"))
 
         if offset < 0:
-            raise self.__exc(
-                status_code=400, message="offset must be non-negative", message_code=110
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="offset must be non-negative", context=ErrorContext(operation="validation"))
 
         async def _execute_read_date_range(active_session: AsyncSession) -> list[dict[str, Any]]:
             query = f"SELECT * FROM {table_name}"
@@ -596,23 +656,13 @@ class SQLOperate:
             self._validate_identifier(order_by, "order_by column name")
 
         if order_direction.upper() not in ["ASC", "DESC"]:
-            raise self.__exc(
-                status_code=400,
-                message="order_direction must be 'ASC' or 'DESC'",
-                message_code=108,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="order_direction must be 'ASC' or 'DESC'", context=ErrorContext(operation="validation"))
 
         if limit is not None and limit <= 0:
-            raise self.__exc(
-                status_code=400,
-                message="limit must be a positive integer",
-                message_code=109,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="limit must be a positive integer", context=ErrorContext(operation="validation"))
 
         if offset < 0:
-            raise self.__exc(
-                status_code=400, message="offset must be non-negative", message_code=110
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="offset must be non-negative", context=ErrorContext(operation="validation"))
 
         async def _execute_read_conditions(active_session: AsyncSession) -> list[dict[str, Any]]:
             query = f"SELECT * FROM {table_name}"
@@ -723,9 +773,9 @@ class SQLOperate:
 
         if fetch_mode not in ["all", "one", "none"]:
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.VALIDATION_ERROR,
                 message="fetch_mode must be 'all', 'one', or 'none'",
-                message_code=111,
+                context=ErrorContext(operation="execute_raw_query", details={"fetch_mode": fetch_mode})
             )
 
         async def _execute_raw(active_session: AsyncSession):
@@ -792,18 +842,10 @@ class SQLOperate:
             update_list = []
             for idx, item in enumerate(update_data):
                 if not isinstance(item, dict) or where_field not in item or "data" not in item:
-                    raise self.__exc(
-                        status_code=400,
-                        message=f"Item at index {idx} must have '{where_field}' and 'data' fields",
-                        message_code=116,
-                    )
+                    raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Item at index {idx} must have '{where_field}' and 'data' fields", context=ErrorContext(operation="validation"))
                 update_list.append(item)
         else:
-            raise self.__exc(
-                status_code=400,
-                message="Update data must be a list",
-                message_code=117,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="Update data must be a list", context=ErrorContext(operation="validation"))
 
         if not update_list:
             return []
@@ -819,11 +861,7 @@ class SQLOperate:
                 if update_fields:  # Only include if there are valid fields to update
                     validated_updates.append({where_field: where_value, "data": update_fields})
             except Exception as e:
-                raise self.__exc(
-                    status_code=400,
-                    message=f"Invalid update data at index {idx}: {str(e)}",
-                    message_code=118,
-                )
+                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Invalid update data at index {idx}: {str(e)}", context=ErrorContext(operation="validation"))
 
         if not validated_updates:
             return []
@@ -975,21 +1013,13 @@ class SQLOperate:
         self._validate_identifier(table_name, "table name")
 
         if not filters:
-            raise self.__exc(
-                status_code=400,
-                message="Filters are required for delete_many operation",
-                message_code=111,
-            )
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="Filters are required for delete_many operation", context=ErrorContext(operation="validation"))
 
         # Helper function to execute the actual SQL operations
         async def _execute_delete_filter(active_session: AsyncSession) -> list[Any]:
             where_clause, params = self._build_where_clause(filters)
             if not where_clause:
-                raise self.__exc(
-                    status_code=400,
-                    message="No valid filters provided for delete_many operation",
-                    message_code=112,
-                )
+                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="No valid filters provided for delete_many operation", context=ErrorContext(operation="validation"))
 
             # First, select the IDs that will be deleted
             select_query = f"SELECT id FROM {table_name}{where_clause}"

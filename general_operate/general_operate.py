@@ -1,26 +1,18 @@
-import asyncio
-import functools
 import json
-import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Awaitable
 from datetime import datetime, UTC
 from typing import Any, Generic, TypeVar
 from contextlib import asynccontextmanager
-
-import pymysql
 import redis
 import structlog
-from redis import RedisError
-from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm.exc import UnmappedInstanceError
-
-from . import GeneralOperateException
+from . import GeneralOperateException, ErrorCode, ErrorContext
 from .app.cache_operate import CacheOperate
 from .app.client.influxdb import InfluxDB
 from .app.influxdb_operate import InfluxOperate
 from .app.sql_operate import SQLOperate
+from .core import handle_errors
 from .kafka.producer_operate import KafkaProducerOperate
 from .kafka.consumer_operate import KafkaConsumerOperate
 from .kafka.event_bus import KafkaEventBus
@@ -46,7 +38,6 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         redis_client: redis.asyncio.Redis = None,
         influxdb: InfluxDB = None,
         kafka_config: dict[str, Any] | None = None,
-        exc=GeneralOperateException,
     ):
         # Get module from subclass
         module = self.get_module()
@@ -56,12 +47,15 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         self.main_schemas = module.main_schemas
         self.create_schemas = module.create_schemas
         self.update_schemas = module.update_schemas
-        self.__exc = exc
+        self.__exc = GeneralOperateException
 
         # Initialize parent classes
-        CacheOperate.__init__(self, redis_client, exc)
-        SQLOperate.__init__(self, database_client, exc)
-        InfluxOperate.__init__(self, influxdb)
+        if redis_client is not None:
+            CacheOperate.__init__(self, redis_client)
+        if database_client is not None:
+            SQLOperate.__init__(self, database_client)
+        if influxdb is not None:
+            InfluxOperate.__init__(self, influxdb)
         
         # Initialize Kafka components
         self._kafka_producer = None
@@ -141,116 +135,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         """
         pass
 
-    @staticmethod
-    def exception_handler(func):
-        """Exception handler decorator for GeneralOperate methods"""
-        def handle_exceptions(self, e):
-            """Common exception handling logic"""
-            # redis error
-            if isinstance(e, redis.ConnectionError):
-                raise self.__exc(
-                    status_code=487,
-                    message=f"Redis connection error: {str(e)}",
-                    message_code=3001,
-                )
-            elif isinstance(e, redis.TimeoutError):
-                raise self.__exc(
-                    status_code=487,
-                    message=f"Redis timeout error: {str(e)}",
-                    message_code=3002,
-                )
-            elif isinstance(e, redis.ResponseError):
-                raise self.__exc(
-                    status_code=487,
-                    message=f"Redis response error: {str(e)}",
-                    message_code=3003,
-                )
-            elif isinstance(e, RedisError):
-                error_message = str(e)
-                pattern = r"Error (\d+)"
-                match = re.search(pattern, error_message)
-                if match:
-                    error_code = match.group(1)
-                    raise self.__exc(
-                        status_code=492,
-                        message=f"Redis error: {error_message}",
-                        message_code=int(error_code),
-                    )
-                else:
-                    raise self.__exc(
-                        status_code=487, message=error_message, message_code=3004
-                    )
-            # decode error
-            elif isinstance(e, json.JSONDecodeError):
-                raise self.__exc(
-                    status_code=491,
-                    message=f"JSON decode error: {str(e)}",
-                    message_code=3005,
-                )
-            elif isinstance(e, DBAPIError):
-                if isinstance(e.orig, AsyncAdapt_asyncpg_dbapi.Error):
-                    pg_error = e.orig
-                    message = str(pg_error).replace("\n", " ").replace("\r", " ").split(': ', 1)[1]
-                    code = getattr(pg_error, "sqlstate", "1") or "1"
-                    raise self.__exc(
-                        status_code=489, message=message, message_code=code
-                    )
-                elif isinstance(e.orig, pymysql.Error):
-                    code, msg = e.orig.args
-                    raise self.__exc(status_code=486, message=msg, message_code=code)
-                else:
-                    # Generic database error handling
-                    message = str(e).replace("\n", " ").replace("\r", " ")
-                    raise self.__exc(
-                        status_code=487, message=message, message_code="UNKNOWN"
-                    )
-            elif isinstance(e, UnmappedInstanceError):
-                raise self.__exc(
-                    status_code=486,
-                    message="id: one or more of ids is not exist",
-                    message_code=2,
-                )
-            elif isinstance(e, (ValueError, TypeError, AttributeError)) and "SQL" in str(e):
-                # Data validation or SQL-related errors
-                raise self.__exc(
-                    status_code=400,
-                    message=f"SQL operation validation error: {str(e)}",
-                    message_code=299
-                )
-            elif isinstance(e, GeneralOperateException):
-                # If it's already a GeneralOperateException, raise it directly
-                raise e
-            else:
-                # For truly unexpected exceptions
-                raise self.__exc(
-                    status_code=500,
-                    message=f"Operation error: {str(e)}",
-                    message_code=9999,
-                )
-        @functools.wraps(func)
-        async def async_wrapper(self, *args, **kwargs):
-            try:
-                return await func(self, *args, **kwargs)
-            except Exception as e:
-                # Log unexpected exceptions with full details
-                self.logger.error(f"Unexpected error in {func.__name__}: {type(e).__name__}: {str(e)}", exc_info=True)
-                handle_exceptions(self, e)
-
-        @functools.wraps(func)
-        def sync_wrapper(self, *args, **kwargs):
-            try:
-                return func(self, *args, **kwargs)
-            except Exception as e:
-                # For other exceptions, return self.__exc instance
-                handle_exceptions(self, e)
-
-        # Return appropriate wrapper based on function type
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-
-    @exception_handler
+    @handle_errors(operation="health_check")
     async def health_check(self):
         """Check health of SQL and cache connections"""
         # Check SQL health
@@ -261,7 +146,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
 
         return sql_health and cache_health
 
-    @exception_handler
+    @handle_errors(operation="cache_warming")
     async def cache_warming(self, limit: int = 1000, offset: int = 0):
         """Warm up cache by loading data from SQL in batches"""
         batch_size = min(limit, 500)  # Limit batch size to prevent memory issues
@@ -301,7 +186,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             "message": f"Successfully warmed cache with {total_loaded} records",
         }
 
-    @exception_handler
+    @handle_errors(operation="cache_clear")
     async def cache_clear(self):
         """Clear all cache data for this table"""
         # Clear main cache
@@ -315,7 +200,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
 
         return {"success": True, "message": "Cache cleared successfully"}
 
-    @exception_handler
+    @handle_errors(operation="read_data_by_id")
     async def read_data_by_id(self, id_value: set) -> list[T]:
         """Read data with cache-first strategy and null value protection"""
         if not id_value:
@@ -346,18 +231,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                     if cached_data:
                         # Parse cached data and convert to schema
                         for cache_item in cached_data:
-                            data_value = list(cache_item.values())[0]
-                            if isinstance(data_value, str):
-                                try:
-                                    data_value = json.loads(data_value)
-                                except json.JSONDecodeError as json_err:
-                                    self.logger.warning(f"Invalid JSON in cache for {self.table_name}:{id_key}: {json_err}")
-                                    cache_miss_ids.add(id_key)
-                                    continue
-
-                            # Convert to main schema
+                            # cache_item is already the parsed dict data from get_caches
                             try:
-                                schema_data = self.main_schemas(**data_value)
+                                schema_data = self.main_schemas(**cache_item)
                                 results.append(schema_data)
                             except Exception as schema_err:
                                 self.logger.warning(f"Schema validation failed for {self.table_name}:{id_key}: {schema_err}")
@@ -416,9 +292,10 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 except Exception as sql_err:
                     self.logger.error(f"SQL fallback failed in {operation_context}: {sql_err}")
                     raise self.__exc(
-                        status_code=500,
+                        code=ErrorCode.UNKNOWN_ERROR,
                         message=f"Both cache and SQL operations failed: {str(sql_err)}",
-                        message_code=9996
+                        context=ErrorContext(operation="read_data_by_id", resource=self.table_name, details={"fallback_failed": True}),
+                        cause=sql_err
                     )
 
             self.logger.debug(f"Completed {operation_context}, returned {len(results)} records")
@@ -429,12 +306,13 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         except Exception as e:
             self.logger.error(f"Unexpected error in {operation_context}: {str(e)}")
             raise self.__exc(
-                status_code=500,
+                code=ErrorCode.UNKNOWN_ERROR,
                 message=f"Unexpected error during data read: {str(e)}",
-                message_code=9995
+                context=ErrorContext(operation="read_data_by_id", resource=self.table_name),
+                cause=e
             )
 
-    @exception_handler
+    @handle_errors(operation="read_data_by_filter")
     async def read_data_by_filter(self, filters: dict[str, Any], limit: int | None = None, offset: int = 0) -> list[T]:
         """Read data by filter conditions with optional pagination"""
         try:
@@ -482,12 +360,13 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         except Exception as e:
             self.logger.error(f"SQL fetch failed for {len(id_value)} IDs in table {self.table_name}: {str(e)}")
             raise self.__exc(
-                status_code=500,
+                code=ErrorCode.DB_QUERY_ERROR,
                 message=f"Database read operation failed: {str(e)}",
-                message_code=9994
+                context=ErrorContext(operation="fetch_from_sql", resource=self.table_name),
+                cause=e
             )
 
-    @exception_handler
+    @handle_errors(operation="create_data")
     async def create_data(self, data: list[dict], session=None) -> list[T]:
         """Create data in SQL only (no cache write) - uses bulk insert for better performance
 
@@ -532,7 +411,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
 
         return results
 
-    @exception_handler
+    @handle_errors(operation="create_by_foreign_key")
     async def create_by_foreign_key(self, foreign_key_field: str, foreign_key_value: Any, data: list[Any], session=None) -> list[Any]:
         """
         為指定的外鍵值創建關聯實體
@@ -567,7 +446,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         # 批量創建實體
         return await self.create_data(create_data_list, session=session)
 
-    @exception_handler
+    @handle_errors(operation="update_data")
     async def update_data(self, data: list[dict[str, Any]], where_field: str = "id", session=None) -> list[T]:
         """Update data with bulk operations and enhanced cache consistency
 
@@ -621,7 +500,11 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         if validation_errors:
             error_msg = "Validation errors: " + "; ".join(validation_errors)
             self.logger.error(f"{operation_context} - {error_msg}")
-            raise self.__exc(status_code=400, message=error_msg, message_code=215)
+            raise self.__exc(
+                code=ErrorCode.VALIDATION_ERROR,
+                message=error_msg,
+                context=ErrorContext(operation="update_data", resource=self.table_name)
+            )
 
         if not update_list:
             self.logger.warning(f"{operation_context} - No valid update data after validation")
@@ -688,12 +571,16 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 error_msg += f". Schema errors: {'; '.join(schema_errors)}"
 
             self.logger.error(f"{operation_context} - {error_msg}")
-            raise self.__exc(status_code=400, message=error_msg, message_code=217)
+            raise self.__exc(
+                code=ErrorCode.VALIDATION_ERROR,
+                message=error_msg,
+                context=ErrorContext(operation="update_data", resource=self.table_name)
+            )
 
         self.logger.debug(f"Completed {operation_context}, updated {len(results)} records")
         return results
 
-    @exception_handler
+    @handle_errors(operation="update_by_foreign_key")
     async def update_by_foreign_key(self, foreign_key_field: str, foreign_key_value: Any, data: list[Any], session=None) -> None:
         """
         通用的外鍵關聯數據更新方法，支持批量 CRUD 操作
@@ -757,7 +644,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             await self.create_data(to_create, session=session)
 
 
-    @exception_handler
+    @handle_errors(operation="delete_data")
     async def delete_data(self, id_value: set, session=None):
         """Delete data from both SQL and cache using bulk operations, return successfully deleted IDs
         
@@ -813,7 +700,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         return successfully_deleted_ids
 
 
-    @exception_handler
+    @handle_errors(operation="delete_filter_data")
     async def delete_filter_data(self, filters: dict, session=None):
         """Delete multiple records based on filter conditions
         
@@ -923,7 +810,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 except Exception as e:
                     self.logger.warning(f"Error stopping Kafka component: {e}")
 
-    @exception_handler
+    @handle_errors(operation="send_event")
     async def send_event(
         self,
         event_type: str,
@@ -936,9 +823,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         """Send event to Kafka"""
         if not self._kafka_producer:
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.CONFIGURATION_ERROR,
                 message="Kafka producer not configured",
-                message_code=4200
+                context=ErrorContext(operation="send_event", resource="kafka")
             )
         
         # Determine topic
@@ -946,9 +833,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             topic = getattr(self.module, 'topic_name', None)
             if not topic:
                 raise self.__exc(
-                    status_code=400,
+                    code=ErrorCode.CONFIGURATION_ERROR,
                     message="No topic specified and no default topic in module",
-                    message_code=4201
+                    context=ErrorContext(operation="send_event", resource="kafka", details={"missing": "topic"})
                 )
         
         # Build event data with context
@@ -975,7 +862,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             headers=default_headers
         )
 
-    @exception_handler
+    @handle_errors(operation="start_consuming")
     async def start_consuming(
         self,
         handler: Callable[[dict[str, Any]], Awaitable[None]]
@@ -983,14 +870,14 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         """Start consuming events from Kafka"""
         if not self._kafka_consumer:
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.CONFIGURATION_ERROR,
                 message="Kafka consumer not configured",
-                message_code=4202
+                context=ErrorContext(operation="start_consuming", resource="kafka")
             )
         
         await self._kafka_consumer.consume_events(handler)
 
-    @exception_handler
+    @handle_errors(operation="publish_event")
     async def publish_event(
         self,
         event_type: str,
@@ -1004,9 +891,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         """Publish event using event bus (high-level interface)"""
         if not self._kafka_event_bus:
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.CONFIGURATION_ERROR,
                 message="Kafka event bus not configured",
-                message_code=4203
+                context=ErrorContext(operation="publish_event", resource="kafka")
             )
         
         return await self._kafka_event_bus.publish(
@@ -1019,7 +906,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             key=key
         )
 
-    @exception_handler
+    @handle_errors(operation="subscribe_event")
     async def subscribe_event(
         self,
         event_type: str,
@@ -1031,9 +918,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         """Subscribe to events using event bus"""
         if not self._kafka_event_bus:
             raise self.__exc(
-                status_code=400,
+                code=ErrorCode.CONFIGURATION_ERROR,
                 message="Kafka event bus not configured",
-                message_code=4203
+                context=ErrorContext(operation="subscribe_event", resource="kafka")
             )
         
         return await self._kafka_event_bus.subscribe(

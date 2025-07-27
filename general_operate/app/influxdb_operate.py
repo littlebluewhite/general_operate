@@ -5,14 +5,14 @@ from influxdb_client.client.write_api import WriteOptions
 from influxdb_client.rest import ApiException
 from urllib3.exceptions import NewConnectionError
 
-from ..utils.exception import GeneralOperateException
+from ..core.exceptions import InfluxDBException, ErrorCode, ErrorContext
 from .client.influxdb import InfluxDB
 
 
 class InfluxOperate:
-    def __init__(self, influxdb: InfluxDB = None, exc=GeneralOperateException):
+    def __init__(self, influxdb: InfluxDB = None):
         self.influxdb = influxdb
-        self.__exc = exc
+        self.__exc = InfluxDBException
 
         if influxdb is not None:
             self.__bucket = influxdb.bucket
@@ -44,29 +44,33 @@ class InfluxOperate:
                 return func(self, *args, **kwargs)
             except NewConnectionError as e:
                 raise self.__exc(
-                    status_code=488,
+                    code=ErrorCode.INFLUXDB_CONNECTION_ERROR,
                     message=f"InfluxDB connection failed: {str(e)}",
-                    message_code=1,
+                    context=ErrorContext(operation=func.__name__, resource="influxdb"),
+                    cause=e
                 )
             except ApiException as e:
                 raise self.__exc(
-                    status_code=488,
+                    code=ErrorCode.INFLUXDB_QUERY_ERROR,
                     message=str(e.message).replace("\n", ""),
-                    message_code=e.status,
+                    context=ErrorContext(operation=func.__name__, resource="influxdb", details={"api_status": e.status}),
+                    cause=e
                 )
             except (ValueError, TypeError) as e:
                 # Data validation errors
                 raise self.__exc(
-                    status_code=400,
+                    code=ErrorCode.VALIDATION_ERROR,
                     message=f"InfluxDB data validation error: {str(e)}",
-                    message_code=98
+                    context=ErrorContext(operation=func.__name__, resource="influxdb"),
+                    cause=e
                 )
             except AttributeError as e:
                 # Attribute access errors (missing client, etc)
                 raise self.__exc(
-                    status_code=488,
+                    code=ErrorCode.CONFIGURATION_ERROR,
                     message=f"InfluxDB configuration error: {str(e)}",
-                    message_code=97
+                    context=ErrorContext(operation=func.__name__, resource="influxdb"),
+                    cause=e
                 )
             except Exception as e:
                 # Log unexpected errors with details
@@ -74,9 +78,10 @@ class InfluxOperate:
                 logger = logging.getLogger(__name__)
                 logger.error(f"Unexpected InfluxDB error: {type(e).__name__}: {str(e)}", exc_info=True)
                 raise self.__exc(
-                    status_code=488, 
-                    message=f"InfluxDB error: {type(e).__name__}: {str(e)}", 
-                    message_code=99
+                    code=ErrorCode.UNKNOWN_ERROR,
+                    message=f"InfluxDB error: {type(e).__name__}: {str(e)}",
+                    context=ErrorContext(operation=func.__name__, resource="influxdb"),
+                    cause=e
                 )
 
         return wrapper
@@ -108,9 +113,9 @@ class InfluxOperate:
         """
         if self.writer is None:
             raise self.__exc(
-                status_code=488,
+                code=ErrorCode.CONFIGURATION_ERROR,
                 message="InfluxDB is not configured",
-                message_code=100
+                context=ErrorContext(operation="write", resource="influxdb", details={"missing": "writer"})
             )
 
         self.writer.write(bucket=self.__bucket, org=self.__org, record=p)
@@ -131,9 +136,9 @@ class InfluxOperate:
         """
         if self.reader is None:
             raise self.__exc(
-                status_code=488,
+                code=ErrorCode.CONFIGURATION_ERROR,
                 message="InfluxDB is not configured",
-                message_code=100
+                context=ErrorContext(operation="query", resource="influxdb", details={"missing": "reader"})
             )
 
         data = self.reader.query(org=self.__org, query=q)

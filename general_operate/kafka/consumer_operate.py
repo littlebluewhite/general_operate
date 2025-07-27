@@ -32,13 +32,14 @@ class KafkaConsumerOperate(KafkaOperate[T]):
         deserializer: Callable[[bytes], T] | None = None,
     ):
         if aiokafka is None:
+            from ..core.exceptions import ErrorCode, ErrorContext
             raise KafkaConfigurationException(
-                status_code=500,
+                code=ErrorCode.KAFKA_CONFIGURATION_ERROR,
                 message="aiokafka is not installed. Please install it with: pip install aiokafka",
-                message_code=4101
+                context=ErrorContext(operation="kafka_consumer_init", details={"missing_dependency": "aiokafka"})
             )
         
-        super().__init__(bootstrap_servers, client_id, config, KafkaConsumerException)
+        super().__init__(bootstrap_servers, client_id, config)
         
         self.topics = topics
         self.group_id = group_id

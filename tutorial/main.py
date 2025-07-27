@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from pathlib import Path
+import logfire
 
 # Add project root to Python path first
 project_root = Path(__file__).parent.parent
@@ -65,15 +66,36 @@ app.include_router(APITutorialRouter(db=db, redis=redis_db).create_router())
 @app.exception_handler(GeneralOperateException)
 async def operate_exception_handler(request: Request, exc: GeneralOperateException):
     return JSONResponse(
-        status_code=exc.status_code,
-        content={"message": f"{exc.message}", "message_code": f"{exc.message_code}"},
+        status_code=500,  # Use 500 as default HTTP status code
+        content={
+            "error": {
+                "code": exc.code.value,
+                "name": exc.code.name,
+                "message": exc.message,
+                "context": exc.context.operation if exc.context else None
+            }
+        },
         headers={
-            "message": f"{exc.message}".replace("\n", " "),
-            "message_code": f"{exc.message_code}",
+            "X-Error-Code": str(exc.code.value),
+            "X-Error-Name": exc.code.name,
         },
     )
+logfire.configure(token="pylf_v1_us_Pm9s7JZVRGvtyVdBbjVxyFKL98nK17k1gCWfBlKzss5M")
+logfire.instrument_redis(capture_statement=True)
+logfire.instrument_fastapi(app)
+logfire.instrument_sqlalchemy(engine=db.get_engine(), enable_commenter=True)
 
+from pydantic import BaseModel
+class Item(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    tax: float | None = None
+
+@app.post("/test")
+async def test(body: list[Item]):
+    return body
 
 if __name__ == "__main__":
     asyncio.run(init_db())
-    uvicorn.run("main:app", host="0.0.0.0", port=8005)
+    uvicorn.run("main:app", host="0.0.0.0", port=9000)

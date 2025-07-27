@@ -1,35 +1,24 @@
 """
 Kafka-specific exceptions for GeneralOperate
+Backwards compatibility aliases for the new unified exception system
 """
 
-from .. import GeneralOperateException
+from ..core.exceptions import KafkaException
 
+# Backwards compatibility aliases
+KafkaOperateException = KafkaException
+KafkaConnectionException = KafkaException  
+KafkaProducerException = KafkaException
+KafkaConsumerException = KafkaException
+KafkaSerializationException = KafkaException
+KafkaConfigurationException = KafkaException
 
-class KafkaOperateException(GeneralOperateException):
-    """Base exception for Kafka operations"""
-    pass
-
-
-class KafkaConnectionException(KafkaOperateException):
-    """Raised when Kafka connection fails"""
-    pass
-
-
-class KafkaProducerException(KafkaOperateException):
-    """Raised when Kafka producer operations fail"""
-    pass
-
-
-class KafkaConsumerException(KafkaOperateException):
-    """Raised when Kafka consumer operations fail"""
-    pass
-
-
-class KafkaSerializationException(KafkaOperateException):
-    """Raised when message serialization/deserialization fails"""
-    pass
-
-
-class KafkaConfigurationException(KafkaOperateException):
-    """Raised when Kafka configuration is invalid"""
-    pass
+# For clarity, also export the new unified exception
+__all__ = [
+    "KafkaOperateException",
+    "KafkaConnectionException", 
+    "KafkaProducerException",
+    "KafkaConsumerException",
+    "KafkaSerializationException",
+    "KafkaConfigurationException",
+]

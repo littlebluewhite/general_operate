@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio.engine import create_async_engine
 
 
 class SQLClient:
-    def __init__(self, db_config: dict, echo=False):
+    def __init__(self, db_config: dict, echo=True):
         self.engine_type = db_config["engine"]
         self.host = db_config["host"]
         self.port = db_config["port"]

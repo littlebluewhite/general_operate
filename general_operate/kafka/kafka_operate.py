@@ -23,12 +23,11 @@ class KafkaOperate(Generic[T], ABC):
         bootstrap_servers: str | list[str],
         client_id: str | None = None,
         config: dict[str, Any] | None = None,
-        exc: type[Exception] = KafkaOperateException,
     ):
         self.bootstrap_servers = bootstrap_servers
         self.client_id = client_id or "general-operate"
         self.config = config or {}
-        self._exc = exc
+        self._exc = KafkaOperateException
         self._started = False
         
         # Set up logging

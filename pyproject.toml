@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 
 
 dependencies = [
-    "fastapi>=0.115.0",
+    "fastapi==0.115.0",
     "sqlalchemy[asyncio]>=2.0.41",
     "asyncpg>=0.30.0",
     "aiomysql>=0.2.0",
@@ -19,7 +19,12 @@ dependencies = [
     "hatchling>=1.27.0",
     "aiokafka>=0.12.0",
     "structlog>=25.4.0",
-    "orjson>=3.10.0",
+    "orjson==3.11.1",
+    "certifi==2025.7.14",
+    "coverage==7.10.0",
+    "logfire[fastapi,redis,sqlalchemy]>=4.0.0",
+    "pytest-asyncio==1.1.0",
+    "typing-extensions==4.14.1",
 ]
 
 [project.optional-dependencies]
@@ -150,3 +155,6 @@ dev = [
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.2.1",
 ]
+
+[tool.logfire]
+pydantic_plugin_record = "all"

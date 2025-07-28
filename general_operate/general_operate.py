@@ -42,11 +42,16 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         # Get module from subclass
         module = self.get_module()
 
-        self.module = module
-        self.table_name = module.table_name
-        self.main_schemas = module.main_schemas
-        self.create_schemas = module.create_schemas
-        self.update_schemas = module.update_schemas
+        self.table_name = None
+        self.main_schemas = None
+        self.create_schemas = None
+        self.update_schemas = None
+        if module is not None:
+            self.module = module
+            self.table_name = module.table_name
+            self.main_schemas = module.main_schemas
+            self.create_schemas = module.create_schemas
+            self.update_schemas = module.update_schemas
         self.__exc = GeneralOperateException
 
         # Initialize parent classes

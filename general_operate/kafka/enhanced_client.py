@@ -17,6 +17,7 @@ import structlog
 from .kafka_operate import KafkaOperate
 from .models.event_message import EventMessage
 from .exceptions import KafkaOperateException
+from .config import KafkaConfig, create_kafka_config
 
 logger = structlog.get_logger()
 
@@ -450,58 +451,219 @@ class EnhancedEventBus(KafkaOperate):
         }
 
 
-# Convenient factory methods for backward compatibility with account project patterns
+# Enhanced factory methods with configuration management support
 class KafkaClientFactory:
     """
-    Factory for creating Kafka clients with account project compatibility
-    與 account 項目兼容的 Kafka 客戶端工廠
+    Factory for creating Kafka clients with enhanced configuration management
+    增強的Kafka客戶端工廠，支持配置管理
     """
     
     @staticmethod
+    def _ensure_config(
+        config: KafkaConfig | None,
+        bootstrap_servers: str | list[str] | None,
+        service_name: str,
+        environment: str | None,
+        **kwargs
+    ) -> KafkaConfig:
+        """
+        Ensure we have a valid KafkaConfig instance
+        Helper method to consolidate configuration creation logic
+        """
+        if config is not None:
+            return config
+        
+        # Create config if not provided
+        if bootstrap_servers is None:
+            bootstrap_servers = "localhost:9092"
+        
+        return create_kafka_config(
+            service_name=service_name,
+            environment=environment,
+            bootstrap_servers=[bootstrap_servers] if isinstance(bootstrap_servers, str) else bootstrap_servers,
+            **kwargs
+        )
+    
+    @staticmethod
     def create_async_producer(
-        bootstrap_servers: str | list[str] = "localhost:9092",
-        service_name: str = "general-operate"
+        bootstrap_servers: str | list[str] = None,
+        service_name: str = "general-operate",
+        config: KafkaConfig = None,
+        environment: str = None,
+        **kwargs
     ) -> KafkaAsyncProducer:
-        """Create async producer with simplified interface"""
+        """
+        Create async producer with enhanced configuration support
+        
+        Args:
+            bootstrap_servers: Kafka bootstrap servers (deprecated, use config)
+            service_name: Name of the service
+            config: KafkaConfig instance for advanced configuration
+            environment: Environment name for auto-configuration
+            **kwargs: Additional configuration overrides
+        """
+        config = KafkaClientFactory._ensure_config(
+            config, bootstrap_servers, service_name, environment, **kwargs
+        )
+        
+        # Use config for producer creation
+        producer_config = config.get_producer_config()
+        
         return KafkaAsyncProducer(
-            bootstrap_servers=bootstrap_servers,
-            service_name=service_name
+            bootstrap_servers=config.get_bootstrap_servers(),
+            service_name=service_name,
+            config=producer_config
         )
     
     @staticmethod
     def create_async_consumer(
-        topics: list[str],
-        group_id: str,
-        message_handler: Callable[[EventMessage], Awaitable[None]],
-        bootstrap_servers: str | list[str] = "localhost:9092",
-        service_name: str = "general-operate"
+        topics: list[str] = None,
+        group_id: str = None,
+        message_handler: Callable[[EventMessage], Awaitable[None]] = None,
+        bootstrap_servers: str | list[str] = None,
+        service_name: str = "general-operate",
+        config: KafkaConfig = None,
+        environment: str = None,
+        **kwargs
     ) -> KafkaAsyncConsumer:
-        """Create async consumer with simplified interface""" 
+        """
+        Create async consumer with enhanced configuration support
+        
+        Args:
+            topics: List of topics to subscribe to
+            group_id: Consumer group ID
+            message_handler: Message handling function
+            bootstrap_servers: Kafka bootstrap servers (deprecated, use config)
+            service_name: Name of the service
+            config: KafkaConfig instance for advanced configuration
+            environment: Environment name for auto-configuration
+            **kwargs: Additional configuration overrides
+        """
+        config = KafkaClientFactory._ensure_config(
+            config, bootstrap_servers, service_name, environment, **kwargs
+        )
+        
+        # Use config for consumer creation
+        consumer_config = config.get_consumer_config(group_id=group_id)
+        
         return KafkaAsyncConsumer(
-            bootstrap_servers=bootstrap_servers,
-            topics=topics,
-            group_id=group_id,
+            bootstrap_servers=config.get_bootstrap_servers(),
+            topics=topics or [],
+            group_id=group_id or f"{service_name}-consumer-group",
             message_handler=message_handler,
-            service_name=service_name
+            service_name=service_name,
+            config=consumer_config
         )
     
     @staticmethod
     def create_event_bus(
-        bootstrap_servers: str | list[str] = "localhost:9092",
-        service_name: str = "general-operate"
+        bootstrap_servers: str | list[str] = None,
+        service_name: str = "general-operate",
+        config: KafkaConfig = None,
+        environment: str = None,
+        **kwargs
     ) -> EnhancedEventBus:
-        """Create event bus with simplified interface"""
+        """
+        Create event bus with enhanced configuration support
+        
+        Args:
+            bootstrap_servers: Kafka bootstrap servers (deprecated, use config)
+            service_name: Name of the service
+            config: KafkaConfig instance for advanced configuration
+            environment: Environment name for auto-configuration
+            **kwargs: Additional configuration overrides
+        """
+        config = KafkaClientFactory._ensure_config(
+            config, bootstrap_servers, service_name, environment, **kwargs
+        )
+        
         return EnhancedEventBus(
-            bootstrap_servers=bootstrap_servers,
-            service_name=service_name
+            bootstrap_servers=config.get_bootstrap_servers(),
+            service_name=service_name,
+            config=config.raw_config
         )
     
     @staticmethod
     def create_topic_manager(
-        bootstrap_servers: str | list[str] = "localhost:9092"
+        bootstrap_servers: str | list[str] = None,
+        config: KafkaConfig = None,
+        service_name: str = "general-operate",
+        environment: str = None,
+        **kwargs
     ) -> KafkaTopicManager:
-        """Create topic manager with simplified interface"""
-        return KafkaTopicManager(bootstrap_servers=bootstrap_servers)
+        """
+        Create topic manager with enhanced configuration support
+        
+        Args:
+            bootstrap_servers: Kafka bootstrap servers (deprecated, use config)
+            config: KafkaConfig instance for advanced configuration
+            service_name: Name of the service for configuration context
+            environment: Environment name for auto-configuration
+            **kwargs: Additional configuration overrides
+        """
+        config = KafkaClientFactory._ensure_config(
+            config, bootstrap_servers, service_name, environment, **kwargs
+        )
+        
+        # Use config for admin client
+        admin_config = config.get_admin_config()
+        
+        return KafkaTopicManager(
+            bootstrap_servers=config.get_bootstrap_servers(),
+            config=admin_config
+        )
+    
+    @staticmethod
+    def create_from_config(
+        config: KafkaConfig,
+        component_type: str = "event_bus"
+    ) -> Any:
+        """
+        Create Kafka component directly from configuration
+        直接從配置創建Kafka組件
+        
+        Args:
+            config: KafkaConfig instance
+            component_type: Type of component to create (event_bus, producer, consumer, topic_manager)
+        """
+        if component_type == "event_bus":
+            return KafkaClientFactory.create_event_bus(config=config)
+        elif component_type == "producer":
+            return KafkaClientFactory.create_async_producer(config=config)
+        elif component_type == "consumer":
+            return KafkaClientFactory.create_async_consumer(config=config)
+        elif component_type == "topic_manager":
+            return KafkaClientFactory.create_topic_manager(config=config)
+        else:
+            raise ValueError(f"Unknown component type: {component_type}")
+    
+    @staticmethod
+    def create_from_environment(
+        service_name: str,
+        environment: str,
+        component_type: str = "event_bus",
+        config_path: str = None,
+        **kwargs
+    ) -> Any:
+        """
+        Create Kafka component from environment configuration
+        從環境配置創建Kafka組件
+        
+        Args:
+            service_name: Name of the service
+            environment: Environment name (development, staging, production, test)
+            component_type: Type of component to create
+            config_path: Optional path to configuration file
+            **kwargs: Additional configuration overrides
+        """
+        config = create_kafka_config(
+            service_name=service_name,
+            environment=environment,
+            config_path=config_path,
+            **kwargs
+        )
+        
+        return KafkaClientFactory.create_from_config(config, component_type)
 
 
 # Global enhanced event bus instance for backward compatibility

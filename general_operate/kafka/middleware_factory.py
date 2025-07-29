@@ -300,7 +300,7 @@ class EventBusMiddleware:
             yield result
 
 
-# Backward compatible convenience functions
+# Backward compatible convenience functions - consolidated to reduce redundancy
 def create_auth_service_app(
     bootstrap_servers: str | list[str] = "localhost:9092",
     **kwargs
@@ -342,7 +342,35 @@ def get_service_info(app: FastAPI) -> dict[str, str]:
     }
 
 
-# Account project style factory functions - account 項目樣式的工廠函數
+# Account project style factory functions - consolidated patterns
+def _create_service_app_with_defaults(
+    service_name: str,
+    service_type: str,
+    bootstrap_servers: str | list[str],
+    title: str,
+    description: str,
+    **kwargs
+) -> FastAPI:
+    """
+    Consolidated helper for creating service apps with standard patterns
+    統一的服務應用創建助手，使用標準模式
+    """
+    app_config = {
+        "title": title,
+        "description": description,
+        "version": "1.0.0"
+    }
+    app_config.update(kwargs.pop("app_config", {}))
+    
+    return EventBusMiddlewareFactory.create_flexible_service_app(
+        service_name=service_name,
+        service_type=service_type,
+        bootstrap_servers=bootstrap_servers,
+        app_config=app_config,
+        **kwargs
+    )
+
+
 def create_passwordless_auth_service_app(
     bootstrap_servers: str | list[str] = "localhost:9092",
     **kwargs
@@ -351,15 +379,12 @@ def create_passwordless_auth_service_app(
     Create passwordless auth service app - full account project compatibility
     創建無密碼認證服務應用 - 完全兼容 account 項目
     """
-    return EventBusMiddlewareFactory.create_flexible_service_app(
+    return _create_service_app_with_defaults(
         service_name="auth-service",
         service_type="auth",
         bootstrap_servers=bootstrap_servers,
-        app_config={
-            "title": "Passwordless Auth Service",
-            "description": "Passwordless authentication service with Kafka event integration",
-            "version": "1.0.0"
-        },
+        title="Passwordless Auth Service",
+        description="Passwordless authentication service with Kafka event integration",
         **kwargs
     )
 
@@ -372,10 +397,12 @@ def create_user_management_service_app(
     Create user management service app - account project compatibility
     創建用戶管理服務應用 - account 項目兼容性
     """
-    return EventBusMiddlewareFactory.create_flexible_service_app(
-        service_name="user-service", 
+    return _create_service_app_with_defaults(
+        service_name="user-service",
         service_type="user",
         bootstrap_servers=bootstrap_servers,
+        title="User Management Service",
+        description="User management service with Kafka event integration",
         **kwargs
     )
 

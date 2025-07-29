@@ -1,5 +1,7 @@
 """
-Kafka operations base class for GeneralOperate
+Main Kafka operations module for GeneralOperate
+Provides high-level interface for Kafka producer and consumer operations
+Enhanced with service-specific initialization and topic management
 """
 
 from abc import ABC, abstractmethod
@@ -125,3 +127,33 @@ class KafkaOperate(Generic[T], ABC):
             "client_id": self.client_id,
             **self.config
         }
+
+
+# Import enhanced components for convenient access
+from .producer_operate import KafkaProducerOperate
+from .consumer_operate import KafkaConsumerOperate
+from .event_bus import KafkaEventBus
+from .models.event_message import EventMessage
+from .enhanced_client import (
+    KafkaAsyncProducer,
+    KafkaAsyncConsumer, 
+    KafkaTopicManager,
+    EnhancedEventBus
+)
+from .service_initializer import ServiceEventBusInitializer
+from .middleware_factory import EventBusMiddlewareFactory
+
+__all__ = [
+    'KafkaOperate',
+    'KafkaProducerOperate',
+    'KafkaConsumerOperate', 
+    'KafkaEventBus',
+    'EventMessage',
+    'KafkaOperateException',
+    'KafkaAsyncProducer',
+    'KafkaAsyncConsumer',
+    'KafkaTopicManager', 
+    'EnhancedEventBus',
+    'ServiceEventBusInitializer',
+    'EventBusMiddlewareFactory'
+]

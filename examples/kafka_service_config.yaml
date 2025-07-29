@@ -1,0 +1,107 @@
+# Kafka Service Configuration Example
+# 示例 Kafka 服務配置文件
+
+kafka_topics:
+  # Authentication service topics
+  auth:
+    - name: "auth-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "604800000"  # 7 days
+        compression.type: "gzip"
+    
+    - name: "user-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "2592000000"  # 30 days
+        compression.type: "gzip"
+
+  # User management service topics
+  user:
+    - name: "user-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "2592000000"  # 30 days
+    
+    - name: "user-profile-events"
+      partitions: 2
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "1209600000"  # 14 days
+
+  # Notification service topics
+  notification:
+    - name: "notification-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "86400000"  # 1 day
+    
+    - name: "email-events"
+      partitions: 2
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "259200000"  # 3 days
+
+  # Audit service topics  
+  audit:
+    - name: "audit-events"
+      partitions: 5  # More partitions for high volume
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "7776000000"  # 90 days
+        compression.type: "gzip"
+    
+    - name: "security-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "15552000000"  # 180 days
+        compression.type: "gzip"
+
+  # Default service topics
+  default:
+    - name: "general-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "604800000"  # 7 days
+
+  # Custom business service topics
+  order:
+    - name: "order-events"
+      partitions: 4
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "2592000000"  # 30 days
+    
+    - name: "payment-events"
+      partitions: 3
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "7776000000"  # 90 days (compliance)
+        compression.type: "gzip"
+
+  # Analytics service topics
+  analytics:
+    - name: "analytics-events"
+      partitions: 6  # High throughput
+      replication_factor: 1
+      config:
+        cleanup.policy: "delete"
+        retention.ms: "1209600000"  # 14 days
+        compression.type: "snappy"  # Better for analytics workloads

@@ -204,7 +204,7 @@ class SQLOperate:
             lower_value = value.lower().strip()
 
             # 對於 template / description 類的大字串跳過關鍵字偵測
-            exempt_columns = {"content_template", "subject_template", "description"}
+            exempt_columns = {"content_template", "subject_template", "description", "content"}
             if column_name not in exempt_columns:
                 # 檢查危險字元 / 注釋模式
                 for pattern in dangerous_patterns:

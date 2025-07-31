@@ -13,9 +13,6 @@ from .app.client.influxdb import InfluxDB
 from .app.influxdb_operate import InfluxOperate
 from .app.sql_operate import SQLOperate
 from .core import handle_errors
-from .kafka.producer_operate import KafkaProducerOperate
-from .kafka.consumer_operate import KafkaConsumerOperate
-from .kafka.event_bus import KafkaEventBus
 
 T = TypeVar('T')
 

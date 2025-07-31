@@ -1,0 +1,168 @@
+# Kafka Service Configuration Template
+# 完整的Kafka服務配置模板
+# Use this template to create environment-specific configurations
+
+# Service identification
+service_name: "my-service"              # Required: Name of your service
+service_type: "default"                 # Optional: Service type (auth, user, notification, audit, default, custom)
+environment: "development"              # Required: Environment name (development, staging, production, test)
+
+# Kafka connection settings
+bootstrap_servers:                      # Required: List of Kafka bootstrap servers
+  - "localhost:9092"                    # Development: Single broker
+  # - "kafka-1.example.com:9092"       # Production: Multiple brokers
+  # - "kafka-2.example.com:9092"
+  # - "kafka-3.example.com:9092"
+
+# Security configuration
+security:
+  protocol: "PLAINTEXT"                 # Security protocol: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL
+  # mechanism: "PLAIN"                  # SASL mechanism: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, GSSAPI, OAUTHBEARER
+  # username: "${KAFKA_USERNAME}"       # SASL username (use env vars for secrets)
+  # password: "${KAFKA_PASSWORD}"       # SASL password (use env vars for secrets)
+  # ssl_ca_location: "/etc/ssl/ca-cert" # SSL CA certificate location
+  # ssl_certificate_location: "/etc/ssl/client-cert" # SSL client certificate
+  # ssl_key_location: "/etc/ssl/client-key"          # SSL client key
+  ssl_check_hostname: true              # Verify SSL hostname
+
+# Producer configuration
+producer:
+  acks: "1"                            # Acknowledgment level: "0", "1", "all"
+  enable_idempotence: false            # Enable idempotent producer (recommended for production)
+  compression_type: "none"             # Compression: none, gzip, snappy, lz4, zstd
+  retries: 3                           # Number of retries
+  retry_backoff_ms: 100                # Retry backoff in milliseconds
+  request_timeout_ms: 30000            # Request timeout in milliseconds
+  delivery_timeout_ms: 120000          # Delivery timeout in milliseconds
+  batch_size: 16384                    # Batch size in bytes
+  linger_ms: 0                         # Linger time in milliseconds
+  buffer_memory: 33554432              # Buffer memory in bytes
+
+# Consumer configuration  
+consumer:
+  auto_offset_reset: "latest"          # Auto offset reset: earliest, latest, none
+  enable_auto_commit: false            # Enable auto commit (recommended: false)
+  group_id: null                       # Consumer group ID (null = auto-generate)
+  max_poll_records: 500                # Maximum records per poll
+  session_timeout_ms: 30000            # Session timeout in milliseconds
+  heartbeat_interval_ms: 3000          # Heartbeat interval in milliseconds
+  fetch_min_bytes: 1                   # Minimum fetch bytes
+  fetch_max_wait_ms: 500               # Maximum fetch wait time in milliseconds
+  auto_commit_interval_ms: 5000        # Auto commit interval in milliseconds
+
+# Topic configurations
+topics:
+  - name: "my-events"                  # Topic name
+    partitions: 3                      # Number of partitions
+    replication_factor: 1              # Replication factor
+    config:                            # Topic-specific configuration
+      retention.ms: "604800000"        # Retention time (7 days)
+      cleanup.policy: "delete"         # Cleanup policy: delete, compact
+      compression.type: "producer"     # Topic compression
+      # segment.ms: "604800000"        # Segment time
+      # max.message.bytes: "1000000"   # Max message size
+
+  - name: "my-audit-logs"
+    partitions: 1                      # Single partition for ordered processing
+    replication_factor: 2              # Higher replication for important data
+    config:
+      retention.ms: "2592000000"       # 30 days retention
+      cleanup.policy: "delete"
+      compression.type: "gzip"
+
+# Circuit breaker configuration
+circuit_breaker_enabled: true          # Enable circuit breaker
+circuit_breaker_failure_threshold: 5   # Failure threshold before opening
+circuit_breaker_recovery_timeout: 60   # Recovery timeout in seconds
+
+# Monitoring and observability
+monitoring_enabled: true               # Enable monitoring
+health_check_enabled: true             # Enable health checks
+metrics_export_enabled: true           # Enable metrics export
+
+# Retry configuration
+retry_enabled: true                    # Enable retry mechanism
+max_retries: 3                         # Maximum number of retries
+retry_backoff_factor: 1.0              # Retry backoff multiplier
+max_retry_backoff: 60.0                # Maximum retry backoff in seconds
+
+# Environment-specific overrides
+# These sections show how to configure for different environments
+
+# Development environment example
+development:
+  bootstrap_servers: ["localhost:9092"]
+  security:
+    protocol: "PLAINTEXT"
+  producer:
+    acks: "1"
+    enable_idempotence: false
+  monitoring_enabled: true
+  circuit_breaker_enabled: true
+
+# Staging environment example  
+staging:
+  bootstrap_servers: ["kafka-staging.example.com:9092"]
+  security:
+    protocol: "SASL_SSL"
+    mechanism: "PLAIN"
+    username: "${KAFKA_STAGING_USERNAME}"
+    password: "${KAFKA_STAGING_PASSWORD}"
+  producer:
+    acks: "all" 
+    enable_idempotence: true
+    compression_type: "gzip"
+  monitoring_enabled: true
+  circuit_breaker_enabled: true
+
+# Production environment example
+production:
+  bootstrap_servers:
+    - "kafka-1.prod.example.com:9092"
+    - "kafka-2.prod.example.com:9092" 
+    - "kafka-3.prod.example.com:9092"
+  security:
+    protocol: "SASL_SSL"
+    mechanism: "PLAIN"
+    username: "${KAFKA_PROD_USERNAME}"
+    password: "${KAFKA_PROD_PASSWORD}"
+    ssl_ca_location: "/etc/ssl/ca-cert.pem"
+  producer:
+    acks: "all"
+    enable_idempotence: true
+    compression_type: "gzip"
+    retries: 10
+    retry_backoff_ms: 1000
+  consumer:
+    auto_offset_reset: "earliest"
+    max_poll_records: 250
+  circuit_breaker_enabled: true
+  circuit_breaker_failure_threshold: 10
+  circuit_breaker_recovery_timeout: 120
+  monitoring_enabled: true
+  retry_enabled: true
+  max_retries: 5
+
+# Test environment example
+test:
+  bootstrap_servers: ["localhost:9092"]
+  security:
+    protocol: "PLAINTEXT"
+  producer:
+    acks: "1"
+    compression_type: "none"
+  consumer:
+    auto_offset_reset: "earliest"
+    enable_auto_commit: true
+  circuit_breaker_enabled: false
+  monitoring_enabled: false
+
+# Notes on configuration:
+# 1. Use environment variables for sensitive data (passwords, certificates)
+# 2. Adjust timeouts based on your network conditions
+# 3. Higher replication factor for production environments
+# 4. Enable idempotence for exactly-once delivery semantics
+# 5. Use compression to reduce network bandwidth
+# 6. Monitor and tune batch_size and linger_ms for throughput
+# 7. Set appropriate retention policies for your use case
+# 8. Test your configuration in staging before production deployment

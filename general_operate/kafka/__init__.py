@@ -48,6 +48,27 @@ from .middleware_factory import (
     get_service_info
 )
 
+# Configuration and validation
+from .config import (
+    KafkaConfig,
+    KafkaConfigFactory,
+    KafkaConfigDefaults,
+    create_kafka_config,
+    load_environment_config
+)
+
+from .validation import (
+    KafkaServiceConfig,
+    TopicConfig,
+    SecurityConfig,
+    ProducerConfig,
+    ConsumerConfig,
+    EnvironmentConfig,
+    validate_kafka_config,
+    validate_topic_config,
+    validate_environment_config
+)
+
 __all__ = [
     # Core components
     "KafkaOperate",
@@ -86,5 +107,21 @@ __all__ = [
     "create_user_management_service_app",
     "create_service_from_settings",
     "get_event_bus",
-    "get_service_info"
+    "get_service_info",
+    
+    # Configuration and validation
+    "KafkaConfig",
+    "KafkaConfigFactory",
+    "KafkaConfigDefaults",
+    "create_kafka_config",
+    "load_environment_config",
+    "KafkaServiceConfig",
+    "TopicConfig",
+    "SecurityConfig",
+    "ProducerConfig",
+    "ConsumerConfig",
+    "EnvironmentConfig",
+    "validate_kafka_config",
+    "validate_topic_config",
+    "validate_environment_config"
 ]

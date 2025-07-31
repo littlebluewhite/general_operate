@@ -203,23 +203,25 @@ class SQLOperate:
             ]
             lower_value = value.lower().strip()
 
-            # Check for comment patterns and procedure patterns
-            for pattern in dangerous_patterns:
-                if pattern in lower_value:
-                    raise self.__exc(
-                        code=ErrorCode.VALIDATION_ERROR,
-                        message=f"Value for column '{column_name}' contains potentially dangerous SQL characters",
-                        context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "pattern": pattern})
-                    )
-
-            # Check for SQL injection patterns (more specific)
-            for keyword in sql_keywords:
-                if keyword in lower_value:
-                    raise self.__exc(
-                        code=ErrorCode.VALIDATION_ERROR,
-                        message=f"Value for column '{column_name}' contains potentially dangerous SQL keywords",
-                        context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "keyword": keyword})
-                    )
+            # 對於 template / description 類的大字串跳過關鍵字偵測
+            exempt_columns = {"content_template", "subject_template", "description"}
+            if column_name not in exempt_columns:
+                # 檢查危險字元 / 注釋模式
+                for pattern in dangerous_patterns:
+                    if pattern in lower_value:
+                        raise self.__exc(
+                            code=ErrorCode.VALIDATION_ERROR,
+                            message=f"Value for column '{column_name}' contains potentially dangerous SQL characters",
+                            context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "pattern": pattern})
+                        )
+                # 使用 word boundary 的正規表示式降低誤判
+                for keyword in sql_keywords:
+                    if re.search(rf"\b{re.escape(keyword)}\b", lower_value):
+                        raise self.__exc(
+                            code=ErrorCode.VALIDATION_ERROR,
+                            message=f"Value for column '{column_name}' contains potentially dangerous SQL keyword '{keyword}'",
+                            context=ErrorContext(operation="validate_data_value", details={"column_name": column_name, "keyword": keyword})
+                        )
 
     def _validate_data_dict(
             self,

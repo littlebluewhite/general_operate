@@ -18,6 +18,7 @@ import structlog
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from aiokafka.errors import KafkaConnectionError, KafkaTimeoutError
+from aiokafka.helpers import create_ssl_context
 from .manager_config import RetryConfig
 
 logger = structlog.get_logger()
@@ -30,6 +31,8 @@ __all__ = [
     "ProcessingResult",
     "EventMessage",
     "CircuitBreaker",
+    "SecurityConfigBuilder",
+    "KafkaConnectionBuilder",
     "KafkaAsyncConsumer",
     "KafkaAsyncProducer",
     "KafkaEventBus",
@@ -266,6 +269,129 @@ class CircuitBreaker:
             self.state = "open"
 
 
+class SecurityConfigBuilder:
+    """Builds security configuration for Kafka clients using modern aiokafka patterns"""
+    
+    @staticmethod
+    def build(kafka_config: dict[str, Any]) -> dict[str, Any]:
+        """Build security configuration based on protocol"""
+        security_config = {}
+        
+        protocol = kafka_config.get("security_protocol", "PLAINTEXT")
+        security_config["security_protocol"] = protocol
+        
+        if protocol in ["SSL", "SASL_SSL"]:
+            # Create SSL context from configuration using aiokafka helper
+            ssl_context = SecurityConfigBuilder._create_ssl_context(kafka_config)
+            if ssl_context:
+                security_config["ssl_context"] = ssl_context
+        
+        if protocol in ["SASL_PLAINTEXT", "SASL_SSL"]:
+            # Add SASL configuration
+            sasl_config = SecurityConfigBuilder._build_sasl_config(kafka_config)
+            security_config.update(sasl_config)
+        
+        return security_config
+    
+    @staticmethod
+    def _create_ssl_context(kafka_config: dict[str, Any]) -> ssl.SSLContext | None:
+        """Create SSL context from configuration using aiokafka helper"""
+        # Check if we have SSL configuration
+        ssl_params = {
+            "cafile": kafka_config.get("ssl_cafile"),
+            "certfile": kafka_config.get("ssl_certfile"), 
+            "keyfile": kafka_config.get("ssl_keyfile"),
+            "password": kafka_config.get("ssl_password")
+        }
+        
+        # Filter out None values
+        ssl_params = {k: v for k, v in ssl_params.items() if v is not None}
+        
+        if ssl_params:
+            try:
+                return create_ssl_context(**ssl_params)
+            except Exception as e:
+                logger.error("Failed to create SSL context", error=str(e), ssl_params=list(ssl_params.keys()))
+                raise
+        return None
+    
+    @staticmethod
+    def _build_sasl_config(kafka_config: dict[str, Any]) -> dict[str, Any]:
+        """Build SASL configuration"""
+        sasl_config = {}
+        
+        # Valid SASL parameters that aiokafka accepts
+        valid_sasl_params = [
+            "sasl_mechanism", 
+            "sasl_plain_username", 
+            "sasl_plain_password",
+            "sasl_kerberos_service_name", 
+            "sasl_kerberos_domain_name", 
+            "sasl_oauth_token_provider"
+        ]
+        
+        for param in valid_sasl_params:
+            if param in kafka_config:
+                sasl_config[param] = kafka_config[param]
+        
+        return sasl_config
+
+
+class KafkaConnectionBuilder:
+    """Builder pattern for Kafka connection configuration with modern aiokafka practices"""
+    
+    @staticmethod
+    def build_producer_config(
+        kafka_config: dict[str, Any],
+        service_name: str
+    ) -> dict[str, Any]:
+        """Build producer configuration with proper SSL/SASL handling"""
+        config = {
+            "bootstrap_servers": kafka_config["bootstrap_servers"],
+            "value_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
+            "key_serializer": lambda k: k.encode("utf-8") if isinstance(k, str) else k,
+            "client_id": f"{service_name}-producer",
+            "acks": kafka_config.get("acks", "all"),
+            "enable_idempotence": kafka_config.get("enable_idempotence", True),
+            "compression_type": kafka_config.get("compression_type", "gzip"),
+            "request_timeout_ms": kafka_config.get("request_timeout_ms", 30000),
+        }
+        
+        # Handle security configuration using modern approach
+        security_config = SecurityConfigBuilder.build(kafka_config)
+        config.update(security_config)
+        
+        return config
+    
+    @staticmethod
+    def build_consumer_config(
+        kafka_config: dict[str, Any],
+        group_id: str,
+        service_name: str
+    ) -> dict[str, Any]:
+        """Build consumer configuration with proper SSL/SASL handling"""
+        config = {
+            "bootstrap_servers": kafka_config["bootstrap_servers"],
+            "group_id": group_id,
+            "client_id": f"{service_name}-consumer-{group_id}",
+            "auto_offset_reset": kafka_config.get("auto_offset_reset", "latest"),
+            "enable_auto_commit": False,  # Manual commit for better control
+            "value_deserializer": lambda m: m.decode("utf-8") if m else None,
+            "key_deserializer": lambda k: k.decode("utf-8") if k else None,
+            "isolation_level": "read_committed",
+            "session_timeout_ms": kafka_config.get("session_timeout_ms", 30000),
+            "heartbeat_interval_ms": kafka_config.get("heartbeat_interval_ms", 3000),
+            "max_poll_records": kafka_config.get("max_poll_records", 500),
+            "max_poll_interval_ms": kafka_config.get("max_poll_interval_ms", 300000),
+        }
+        
+        # Handle security configuration using modern approach
+        security_config = SecurityConfigBuilder.build(kafka_config)
+        config.update(security_config)
+        
+        return config
+
+
 class KafkaAsyncConsumer:
     """Kafka consumer with retry logic and circuit breaker"""
 
@@ -303,72 +429,26 @@ class KafkaAsyncConsumer:
     async def start(self):
         """Start consumer and dead letter producer"""
         try:
-            # Build consumer configuration with SSL/SASL support
-            consumer_config = {
-                "bootstrap_servers": self.kafka_config["bootstrap_servers"],
-                "group_id": self.group_id,
-                "client_id": f"{self.service_name}-consumer-{self.group_id}",
-                "auto_offset_reset": self.kafka_config["auto_offset_reset"],
-                "enable_auto_commit": False,  # Manual commit for better control
-                "value_deserializer": lambda m: m.decode("utf-8") if m else None,
-                "key_deserializer": lambda k: k.decode("utf-8") if k else None,
-                "isolation_level": "read_committed",
-                "session_timeout_ms": self.kafka_config.get("session_timeout_ms", 30000),
-                "heartbeat_interval_ms": self.kafka_config.get("heartbeat_interval_ms", 3000),
-                "max_poll_records": self.kafka_config.get("max_poll_records", 500),
-                "max_poll_interval_ms": self.kafka_config.get("max_poll_interval_ms", 300000),
-            }
-            
-            # Add security protocol configuration
-            if "security_protocol" in self.kafka_config:
-                consumer_config["security_protocol"] = self.kafka_config["security_protocol"]
-            
-            # Add SSL configuration if present
-            ssl_configs = [
-                "ssl_check_hostname", "ssl_cafile", "ssl_certfile", "ssl_keyfile",
-                "ssl_password", "ssl_context", "ssl_crlfile", "ssl_ciphers"
-            ]
-            for ssl_key in ssl_configs:
-                if ssl_key in self.kafka_config:
-                    consumer_config[ssl_key] = self.kafka_config[ssl_key]
-            
-            # Add SASL configuration if present
-            sasl_configs = [
-                "sasl_mechanism", "sasl_plain_username", "sasl_plain_password",
-                "sasl_kerberos_service_name", "sasl_kerberos_domain_name",
-                "sasl_oauth_token_provider"
-            ]
-            for sasl_key in sasl_configs:
-                if sasl_key in self.kafka_config:
-                    consumer_config[sasl_key] = self.kafka_config[sasl_key]
+            # Build consumer configuration using modern approach
+            consumer_config = KafkaConnectionBuilder.build_consumer_config(
+                self.kafka_config, 
+                self.group_id, 
+                self.service_name
+            )
 
             # Start main consumer
             self.consumer = AIOKafkaConsumer(**consumer_config)
 
             # Start dead letter producer only if DLQ is enabled
             if self.enable_dlq:
-                # Build DLQ producer configuration with SSL/SASL support
-                dlq_producer_config = {
-                    "bootstrap_servers": self.kafka_config["bootstrap_servers"],
-                    "value_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                    "key_serializer": lambda k: k.encode("utf-8") if isinstance(k, str) else k,
-                    "client_id": f"{self.service_name}-dlq-producer",
-                    "acks": self.kafka_config["acks"],
-                    "enable_idempotence": self.kafka_config["enable_idempotence"],
-                    "request_timeout_ms": self.kafka_config.get("request_timeout_ms", 30000),
-                }
+                # Build DLQ producer configuration using modern approach
+                dlq_producer_config = KafkaConnectionBuilder.build_producer_config(
+                    self.kafka_config,
+                    f"{self.service_name}-dlq"
+                )
                 
-                # Add security configuration to DLQ producer
-                if "security_protocol" in self.kafka_config:
-                    dlq_producer_config["security_protocol"] = self.kafka_config["security_protocol"]
-                
-                for ssl_key in ssl_configs:
-                    if ssl_key in self.kafka_config:
-                        dlq_producer_config[ssl_key] = self.kafka_config[ssl_key]
-                
-                for sasl_key in sasl_configs:
-                    if sasl_key in self.kafka_config:
-                        dlq_producer_config[sasl_key] = self.kafka_config[sasl_key]
+                # Override client_id for DLQ producer
+                dlq_producer_config["client_id"] = f"{self.service_name}-dlq-producer"
 
                 self.dead_letter_producer = AIOKafkaProducer(**dlq_producer_config)
                 await self.dead_letter_producer.start()
@@ -379,13 +459,14 @@ class KafkaAsyncConsumer:
             self.consumer.subscribe(self.topics)
 
             logger.info(
-                "Kafka consumer started",
+                "Kafka consumer started with modern configuration",
                 topics=self.topics,
                 group_id=self.group_id,
                 dead_letter_topic=self.dead_letter_topic
                 if self.enable_dlq
                 else "disabled",
                 dlq_enabled=self.enable_dlq,
+                security_protocol=self.kafka_config.get("security_protocol", "PLAINTEXT"),
             )
 
         except Exception as e:
@@ -767,24 +848,24 @@ class KafkaAsyncAdmin:
                 # Import here to avoid circular imports
                 from aiokafka.admin import AIOKafkaAdminClient
 
-                self._admin_client = AIOKafkaAdminClient(
-                    bootstrap_servers=self.kafka_config.get(
+                # Build admin client configuration using modern approach
+                admin_config = {
+                    "bootstrap_servers": self.kafka_config.get(
                         "bootstrap_servers", "localhost:9092"
                     ),
-                    client_id=f"{self.service_name}-admin",
-                    request_timeout_ms=self.request_timeout_ms,
-                    connections_max_idle_ms=self.kafka_config.get(
+                    "client_id": f"{self.service_name}-admin",
+                    "request_timeout_ms": self.request_timeout_ms,
+                    "connections_max_idle_ms": self.kafka_config.get(
                         "connections_max_idle_ms", 540000
                     ),
-                    retry_backoff_ms=self.retry_backoff_ms,
-                    # Security configuration
-                    security_protocol=self.kafka_config.get(
-                        "security_protocol", "PLAINTEXT"
-                    ),
-                    ssl_context=self._create_ssl_context()
-                    if self.kafka_config.get("security_protocol") in ["SSL", "SASL_SSL"]
-                    else None,
-                )
+                    "retry_backoff_ms": self.retry_backoff_ms,
+                }
+
+                # Add security configuration using modern approach
+                security_config = SecurityConfigBuilder.build(self.kafka_config)
+                admin_config.update(security_config)
+
+                self._admin_client = AIOKafkaAdminClient(**admin_config)
 
                 # Start with timeout
                 start_task = asyncio.create_task(self._admin_client.start())
@@ -794,9 +875,10 @@ class KafkaAsyncAdmin:
 
                 self._started = True
                 self.logger.info(
-                    "Kafka admin client started successfully",
+                    "Kafka admin client started with modern configuration",
                     bootstrap_servers=self.kafka_config.get("bootstrap_servers"),
                     timeout_ms=self.request_timeout_ms,
+                    security_protocol=self.kafka_config.get("security_protocol", "PLAINTEXT"),
                 )
 
             except TimeoutError:
@@ -1302,46 +1384,21 @@ class KafkaAsyncProducer:
             return
 
         try:
-            # Build producer configuration with SSL/SASL support
-            producer_config = {
-                "bootstrap_servers": self.kafka_config["bootstrap_servers"],
-                "value_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
-                "key_serializer": lambda k: k.encode("utf-8") if isinstance(k, str) else k,
-                "client_id": f"{self.service_name}-producer",
-                "acks": self.kafka_config["acks"],
-                "enable_idempotence": self.kafka_config["enable_idempotence"],
-                "compression_type": self.kafka_config.get("compression_type", "gzip"),
-                "request_timeout_ms": self.kafka_config.get("request_timeout_ms", 30000),
-            }
-            
-            # Add security protocol configuration
-            if "security_protocol" in self.kafka_config:
-                producer_config["security_protocol"] = self.kafka_config["security_protocol"]
-            
-            # Add SSL configuration if present
-            ssl_configs = [
-                "ssl_check_hostname", "ssl_cafile", "ssl_certfile", "ssl_keyfile",
-                "ssl_password", "ssl_context", "ssl_crlfile", "ssl_ciphers"
-            ]
-            for ssl_key in ssl_configs:
-                if ssl_key in self.kafka_config:
-                    producer_config[ssl_key] = self.kafka_config[ssl_key]
-            
-            # Add SASL configuration if present
-            sasl_configs = [
-                "sasl_mechanism", "sasl_plain_username", "sasl_plain_password",
-                "sasl_kerberos_service_name", "sasl_kerberos_domain_name",
-                "sasl_oauth_token_provider"
-            ]
-            for sasl_key in sasl_configs:
-                if sasl_key in self.kafka_config:
-                    producer_config[sasl_key] = self.kafka_config[sasl_key]
+            # Build producer configuration using modern approach
+            producer_config = KafkaConnectionBuilder.build_producer_config(
+                self.kafka_config,
+                self.service_name
+            )
 
             self.producer = AIOKafkaProducer(**producer_config)
 
             await self.producer.start()
             self.started = True
-            logger.info("Kafka async producer started")
+            logger.info(
+                "Kafka async producer started with modern configuration",
+                service_name=self.service_name,
+                security_protocol=self.kafka_config.get("security_protocol", "PLAINTEXT"),
+            )
 
         except Exception as e:
             logger.error("Failed to start Kafka async producer", error=str(e))

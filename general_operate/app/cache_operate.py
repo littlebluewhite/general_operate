@@ -11,6 +11,7 @@ import redis
 from redis import RedisError
 
 from ..core.exceptions import CacheException, ErrorCode, ErrorContext
+from ..utils.json_encoder import EnhancedJSONEncoder
 
 
 class CacheOperate:
@@ -205,7 +206,7 @@ class CacheOperate:
             "_identifier": identifier
         }
         # 序列化資料
-        serialized_data = json.dumps(enriched_data, ensure_ascii=False)
+        serialized_data = json.dumps(enriched_data, ensure_ascii=False, cls=EnhancedJSONEncoder)
         # 儲存到 Redis
         set_ttl = ttl_seconds if ttl_seconds else random.randint(2000, 5000)
         return key, set_ttl, serialized_data

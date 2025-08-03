@@ -18,8 +18,7 @@ import structlog
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from aiokafka.errors import KafkaConnectionError, KafkaTimeoutError
-
-from .config import RetryConfig
+from .manager_config import RetryConfig
 
 logger = structlog.get_logger()
 

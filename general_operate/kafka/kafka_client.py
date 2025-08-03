@@ -280,6 +280,8 @@ class KafkaAsyncConsumer:
         dead_letter_topic: str | None = None,
         enable_dlq: bool = True,
         filter_event_types: list[str] | None = None,
+        circuit_breaker_threshold: int = 5,
+        circuit_breaker_timeout: float = 60.0,
     ):
         self.topics = topics
         self.group_id = group_id
@@ -293,7 +295,10 @@ class KafkaAsyncConsumer:
         self.dead_letter_topic = dead_letter_topic or f"{topics[0]}.dead_letter"
         self.enable_dlq = enable_dlq
         self.filter_event_types = filter_event_types or []
-        self.circuit_breaker = CircuitBreaker()
+        self.circuit_breaker = CircuitBreaker(
+            threshold=circuit_breaker_threshold,
+            timeout=circuit_breaker_timeout
+        )
 
     async def start(self):
         """Start consumer and dead letter producer"""
@@ -1233,6 +1238,8 @@ class KafkaEventBus:
         dead_letter_topic: str | None = None,
         enable_dlq: bool = True,
         filter_event_types: list[str] | None = None,
+        circuit_breaker_threshold: int = 5,
+        circuit_breaker_timeout: float = 60.0,
     ) -> KafkaAsyncConsumer:
         """Subscribe to events with retry and DLQ support"""
         consumer = KafkaAsyncConsumer(
@@ -1245,6 +1252,8 @@ class KafkaEventBus:
             dead_letter_topic=dead_letter_topic,
             enable_dlq=enable_dlq,
             filter_event_types=filter_event_types,
+            circuit_breaker_threshold=circuit_breaker_threshold,
+            circuit_breaker_timeout=circuit_breaker_timeout,
         )
 
         self.consumers[group_id] = consumer

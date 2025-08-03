@@ -180,8 +180,8 @@ class ServiceEventManager:
         if service_config.consumer_groups:
             for group_config in service_config.consumer_groups:
                 for topic in group_config.topics:
-                    # Follow the pattern: {topic}.dlq
-                    dlq_topic = f"{topic}.dlq"
+                    # Use configured DLQ topic suffix instead of hardcoded ".dlq"
+                    dlq_topic = f"{topic}{service_config.dlq_topic_suffix}"
                     if dlq_topic not in dlq_topics:
                         dlq_topics.append(dlq_topic)
 
@@ -189,15 +189,15 @@ class ServiceEventManager:
         # and generate DLQ topics even without consumer_groups
         if not dlq_topics and service_config.topics:
             for topic in service_config.topics:
-                dlq_topic = f"{topic}.dlq"
+                dlq_topic = f"{topic}{service_config.dlq_topic_suffix}"
                 if dlq_topic not in dlq_topics:
                     dlq_topics.append(dlq_topic)
                     
         # If still no DLQ topics found but DLQ is enabled, provide a default DLQ topic
         # This handles legacy test cases that use subscribe_to_events() dynamically
         if not dlq_topics and service_config.enable_dlq:
-            # Use a default pattern based on service name
-            default_dlq_topic = f"{service_name}.events.dlq"
+            # Use a default pattern based on service name with configured suffix
+            default_dlq_topic = f"{service_name}.events{service_config.dlq_topic_suffix}"
             dlq_topics.append(default_dlq_topic)
 
         return dlq_topics
@@ -232,7 +232,8 @@ class ServiceEventManager:
             )
 
         # Get service configuration
-        consumer_groups = self.service_configs[service_name].consumer_groups
+        service_config = self.service_configs[service_name]
+        consumer_groups = service_config.consumer_groups
 
         if not consumer_groups:
             self.logger.warning(
@@ -250,15 +251,20 @@ class ServiceEventManager:
         # Create consumers for each consumer group
         service_consumers = []
         for group_config in consumer_groups:
+            # Use configured DLQ topic suffix instead of hardcoded ".dlq"
+            dlq_topic = f"{group_config.topics[0]}{service_config.dlq_topic_suffix}"
+            
             consumer = await event_bus.subscribe_with_retry(
                 topics=group_config.topics,
                 group_id=group_config.group_id,
                 handler=message_handler,
                 service_name=service_name,
-                retry_config=self.service_configs[service_name].retry_config,
-                dead_letter_topic=f"{group_config.topics[0]}.dlq",
-                enable_dlq=self.service_configs[service_name].enable_dlq,
-                filter_event_types=group_config.filter_event_types,  # Pass the filter_event_types parameter
+                retry_config=service_config.retry_config,
+                dead_letter_topic=dlq_topic,
+                enable_dlq=service_config.enable_dlq,
+                filter_event_types=group_config.filter_event_types,
+                circuit_breaker_threshold=service_config.circuit_breaker_threshold,
+                circuit_breaker_timeout=service_config.circuit_breaker_timeout,
             )
             service_consumers.append(consumer)
 
@@ -267,7 +273,10 @@ class ServiceEventManager:
                 group_id=group_config.group_id,
                 topics=group_config.topics,
                 filter_event_types=group_config.filter_event_types,
-                dlq_enabled=self.service_configs[service_name].enable_dlq,
+                dlq_enabled=service_config.enable_dlq,
+                dlq_topic=dlq_topic,
+                circuit_breaker_threshold=service_config.circuit_breaker_threshold,
+                circuit_breaker_timeout=service_config.circuit_breaker_timeout,
             )
 
         # Store all consumers for this service
@@ -276,7 +285,7 @@ class ServiceEventManager:
         self.logger.info(
             f"All consumers registered for {service_name} service",
             consumer_count=len(service_consumers),
-            dlq_enabled=self.service_configs[service_name].enable_dlq,
+            dlq_enabled=service_config.enable_dlq,
         )
 
     async def create_topics(self, service_name: str):

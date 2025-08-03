@@ -20,10 +20,10 @@ from pydantic import ValidationError
 
 from general_operate.kafka.manager_config import (
     ConsumerGroupConfig,
+    RetryConfig,
     ServiceConfig,
     TopicConfig,
 )
-from general_operate.kafka.config import RetryConfig
 
 
 class TestRetryConfig:

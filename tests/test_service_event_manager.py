@@ -26,8 +26,7 @@ from general_operate.kafka.kafka_client import (
     MessageStatus,
     ProcessingResult,
 )
-from general_operate.kafka.manager_config import ServiceConfig
-from general_operate.kafka.config import RetryConfig
+from general_operate.kafka.manager_config import ServiceConfig, RetryConfig
 from general_operate.kafka.dlq_handler import DLQHandler
 
 

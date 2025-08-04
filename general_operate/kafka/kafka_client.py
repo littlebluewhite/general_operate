@@ -133,6 +133,13 @@ class EventMessage:
         """Remove sensitive information from event data with patterns"""
         import re
 
+        # Allowed non-sensitive patterns that contain keywords but are safe
+        allowed_patterns = [
+            re.compile(r"^pincode$", re.IGNORECASE),  # Allow "pincode" specifically
+            re.compile(r"^pin_code$", re.IGNORECASE),  # Allow "pin_code" specifically
+            re.compile(r"^user_pincode$", re.IGNORECASE),  # Allow variations
+        ]
+
         # sensitive patterns with case-insensitive regex
         sensitive_patterns = [
             re.compile(r".*password.*", re.IGNORECASE),
@@ -144,7 +151,7 @@ class EventMessage:
             re.compile(r".*social.?security.*", re.IGNORECASE),
             re.compile(r".*credit.?card.*", re.IGNORECASE),
             re.compile(r".*card.?number.*", re.IGNORECASE),
-            re.compile(r".*pin.*", re.IGNORECASE),
+            re.compile(r".*\bpin\b.*", re.IGNORECASE),  # Use word boundary to be more specific
             re.compile(r".*cvv.*", re.IGNORECASE),
             re.compile(r".*cvc.*", re.IGNORECASE),
             re.compile(r".*account.?number.*", re.IGNORECASE),
@@ -160,12 +167,16 @@ class EventMessage:
             re.compile(r"^[A-Za-z0-9+/]{32,}={0,2}$"),  # Base64-like
             re.compile(r"^[a-f0-9]{32,}$"),  # Hex strings (long)
             re.compile(r"^Bearer\s+.+", re.IGNORECASE),  # Bearer tokens
-            re.compile(r"^\d{13,19}$"),  # Credit card numbers
-            re.compile(r"^\d{3}-\d{2}-\d{4}$"),  # SSN format
+            re.compile(r"^\\d{13,19}$"),  # Credit card numbers
+            re.compile(r"^\\d{3}-\\d{2}-\\d{4}$"),  # SSN format
         ]
 
         def is_sensitive_key(key: str) -> bool:
             """Check if key matches sensitive patterns"""
+            # First check if it's in the allowed list
+            if any(pattern.match(key) for pattern in allowed_patterns):
+                return False
+            # Then check if it matches sensitive patterns
             return any(pattern.match(key) for pattern in sensitive_patterns)
 
         def is_sensitive_value(value: Any) -> bool:

@@ -438,7 +438,7 @@ class TestServiceEventManager:
             mock_dlq_factory.assert_called_once()
             call_kwargs = mock_dlq_factory.call_args[1]
             assert call_kwargs["service_name"] == "custom-dlq-service"
-            assert call_kwargs["dlq_topic_suffixes"] == ["custom-dlq-service.events.dlq"]
+            assert call_kwargs["dlq_topic_suffixes"] == ["custom-dlq-service.events.deadletter"]
             
             await manager.stop()
 

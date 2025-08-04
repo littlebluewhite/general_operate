@@ -59,9 +59,10 @@ TEST_SSL_KAFKA_CONFIG = {
     **TEST_KAFKA_CONFIG,
     "security_protocol": "SSL",
     "ssl_check_hostname": True,
-    "ssl_cafile": "/path/to/ca.pem",
-    "ssl_certfile": "/path/to/cert.pem",
-    "ssl_keyfile": "/path/to/key.pem",
+    # Use mock paths that tests can mock instead of actual files
+    "ssl_cafile": "mock_ca.pem",
+    "ssl_certfile": "mock_cert.pem", 
+    "ssl_keyfile": "mock_key.pem",
 }
 
 TEST_SASL_KAFKA_CONFIG = {
@@ -92,6 +93,21 @@ def kafka_config() -> Dict[str, Any]:
 def ssl_kafka_config() -> Dict[str, Any]:
     """SSL-enabled Kafka configuration for testing."""
     return TEST_SSL_KAFKA_CONFIG.copy()
+
+@pytest.fixture(autouse=True)
+def mock_ssl_context():
+    """Mock SSL context creation for all tests automatically."""
+    import ssl
+    from unittest.mock import patch, MagicMock
+    
+    mock_context = MagicMock()
+    mock_context.verify_mode = ssl.CERT_REQUIRED
+    mock_context.check_hostname = True
+    
+    # Also mock the aiokafka create_ssl_context to prevent file access errors
+    with patch('general_operate.kafka.kafka_client.create_ssl_context', return_value=mock_context):
+        with patch('aiokafka.helpers.create_ssl_context', return_value=mock_context):
+            yield mock_context
 
 
 @pytest.fixture

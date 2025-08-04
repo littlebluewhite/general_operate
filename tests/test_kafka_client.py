@@ -959,7 +959,8 @@ class TestSecurityAndSSL:
             # Verify SSL config was passed
             call_kwargs = mock_producer_class.call_args[1]
             assert call_kwargs["security_protocol"] == "SSL"
-            assert call_kwargs["ssl_check_hostname"] is True
+            assert "ssl_context" in call_kwargs
+            # ssl_check_hostname is handled via ssl_context, not passed directly
 
     @pytest.mark.asyncio
     async def test_sasl_configuration(self, sasl_kafka_config):

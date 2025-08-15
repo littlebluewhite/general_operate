@@ -20,6 +20,7 @@ from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from aiokafka.errors import KafkaConnectionError, KafkaTimeoutError
 from aiokafka.helpers import create_ssl_context
 from .manager_config import RetryConfig
+from ..utils.json_encoder import EnhancedJSONEncoder
 
 logger = structlog.get_logger()
 
@@ -101,7 +102,7 @@ class EventMessage:
     def to_json(self) -> str:
         """Convert to JSON string with sanitization"""
         sanitized_data = self._sanitize_data(self._to_serializable_dict())
-        return json.dumps(sanitized_data, ensure_ascii=False)
+        return json.dumps(sanitized_data, ensure_ascii=False, cls=EnhancedJSONEncoder)
 
     @classmethod
     def from_json(cls, json_str: str) -> "EventMessage":

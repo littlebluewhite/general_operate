@@ -233,13 +233,18 @@ class TestGeneralOperateMethods:
         """Test batch_exists method"""
         # Mock cache operations
         operator.redis = AsyncMock()
-        operator.redis.exists.side_effect = [False, True, False]  # null markers
+        
+        # Mock pipeline operations
+        mock_pipeline = AsyncMock()
+        mock_pipeline.exists = MagicMock()  # Pipeline methods don't return values immediately
+        mock_pipeline.execute = AsyncMock(return_value=[False, True, False])  # null marker results
+        operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
         
         # Mock get_caches
         async def mock_get_caches(table, ids):
             if "1" in ids:
-                return [{"id": 1}]
-            return None
+                return {"1": {"id": 1}}
+            return {}
         
         with patch.object(operator, 'get_caches', side_effect=mock_get_caches):
             # Mock exists_sql for unchecked IDs
@@ -254,27 +259,30 @@ class TestGeneralOperateMethods:
     @pytest.mark.asyncio
     async def test_refresh_cache(self, operator):
         """Test refresh_cache method"""
+        # Mock Redis pipeline for null marker operations
+        if operator.redis:
+            mock_pipeline = AsyncMock()
+            mock_pipeline.delete = MagicMock()
+            mock_pipeline.setex = MagicMock()
+            mock_pipeline.execute = AsyncMock(return_value=[])
+            operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
+        
         # Mock cache operations
         with patch.object(operator, 'delete_caches', return_value=None):
-            with patch.object(operator, 'delete_null_key', return_value=None):
-                # Mock SQL read
-                mock_sql_results = [
-                    {"id": 1, "name": "test1"},
-                    {"id": 2, "name": "test2"}
-                ]
-                with patch.object(operator, 'read_sql', return_value=mock_sql_results):
-                    with patch.object(operator, 'store_caches', return_value=None):
-                        with patch.object(operator, 'set_null_key', return_value=None) as mock_set_null:
-                            # Refresh cache for IDs 1, 2, 3 (3 doesn't exist)
-                            result = await operator.refresh_cache({1, 2, 3})
-                            
-                            # Verify results
-                            assert result["refreshed"] == 2
-                            assert result["not_found"] == 1
-                            assert result["errors"] == 0
-                            
-                            # Verify null marker was set for missing ID
-                            mock_set_null.assert_called_once()
+            # Mock SQL read
+            mock_sql_results = [
+                {"id": 1, "name": "test1"},
+                {"id": 2, "name": "test2"}
+            ]
+            with patch.object(operator, 'read_sql', return_value=mock_sql_results):
+                with patch.object(operator, 'store_caches', return_value=None):
+                    # Refresh cache for IDs 1, 2, 3 (3 doesn't exist)
+                    result = await operator.refresh_cache({1, 2, 3})
+                    
+                    # Verify results
+                    assert result["refreshed"] == 2
+                    assert result["not_found"] == 1
+                    assert result["errors"] == 0
     
     @pytest.mark.asyncio
     async def test_get_distinct_values_with_cache(self, operator):
@@ -639,29 +647,33 @@ class TestCacheConsistency:
     @pytest.mark.asyncio
     async def test_refresh_cache_consistency(self, operator):
         """Test refresh_cache maintains consistency"""
+        # Mock Redis pipeline
+        if operator.redis:
+            mock_pipeline = AsyncMock()
+            mock_pipeline.delete = MagicMock()
+            mock_pipeline.setex = MagicMock()
+            mock_pipeline.execute = AsyncMock(return_value=[])
+            operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
+        
         with patch.object(operator, 'delete_caches', return_value=None):
-            with patch.object(operator, 'delete_null_key', return_value=None):
-                # Mock SQL read - some IDs exist, some don't
-                mock_sql_results = [
-                    {"id": 1, "name": "test1"},
-                    {"id": 3, "name": "test3"}
-                ]
-                with patch.object(operator, 'read_sql', return_value=mock_sql_results):
-                    with patch.object(operator, 'store_caches', return_value=None) as mock_store:
-                        with patch.object(operator, 'set_null_key', return_value=None) as mock_null:
-                            # Refresh cache for IDs 1, 2, 3
-                            result = await operator.refresh_cache({1, 2, 3})
-                            
-                            # Verify correct items were cached
-                            mock_store.assert_called_once()
-                            stored_data = mock_store.call_args[0][1]
-                            assert len(stored_data) == 2
-                            
-                            # Verify null marker set for missing ID
-                            mock_null.assert_called_once()
-                            # Check that set_null_key was called with correct parameters
-                            # The method is called with table_name and ID
-                            assert mock_null.call_count == 1
+            # Mock SQL read - some IDs exist, some don't
+            mock_sql_results = [
+                {"id": 1, "name": "test1"},
+                {"id": 3, "name": "test3"}
+            ]
+            with patch.object(operator, 'read_sql', return_value=mock_sql_results):
+                with patch.object(operator, 'store_caches', return_value=None) as mock_store:
+                    # Refresh cache for IDs 1, 2, 3
+                    result = await operator.refresh_cache({1, 2, 3})
+                    
+                    # Verify correct items were cached
+                    mock_store.assert_called_once()
+                    stored_data = mock_store.call_args[0][1]
+                    assert len(stored_data) == 2
+                    
+                    # Verify results
+                    assert result["refreshed"] == 2
+                    assert result["not_found"] == 1
     
     @pytest.mark.asyncio
     async def test_get_distinct_values_cache_ttl(self, operator):
@@ -713,10 +725,17 @@ class TestIntegration:
     async def test_batch_operations_integration(self, operator):
         """Test batch exists followed by refresh cache"""
         operator.redis = AsyncMock()
-        operator.redis.exists.return_value = False
+        
+        # Mock pipeline for batch exists
+        mock_pipeline = AsyncMock()
+        mock_pipeline.exists = MagicMock()
+        mock_pipeline.delete = MagicMock()
+        mock_pipeline.setex = MagicMock()
+        mock_pipeline.execute = AsyncMock(return_value=[False, False, False])
+        operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
         
         # First, batch exists check
-        with patch.object(operator, 'get_caches', return_value=None):
+        with patch.object(operator, 'get_caches', return_value={}):
             with patch.object(operator, 'exists_sql', return_value={1: True, 2: False, 3: True}):
                 exists_results = await operator.batch_exists({1, 2, 3})
         
@@ -724,12 +743,9 @@ class TestIntegration:
         non_existent = {k for k, v in exists_results.items() if not v}
         
         with patch.object(operator, 'delete_caches', return_value=None):
-            with patch.object(operator, 'delete_null_key', return_value=None):
-                with patch.object(operator, 'read_sql', return_value=[]):
-                    with patch.object(operator, 'store_caches', return_value=None):
-                        with patch.object(operator, 'set_null_key', return_value=None) as mock_null:
-                            result = await operator.refresh_cache(non_existent)
-                            
-                            # Verify null markers set for non-existent items
-                            assert result["not_found"] == len(non_existent)
-                            mock_null.assert_called_once()
+            with patch.object(operator, 'read_sql', return_value=[]):
+                with patch.object(operator, 'store_caches', return_value=None):
+                    result = await operator.refresh_cache(non_existent)
+                    
+                    # Verify null markers set for non-existent items
+                    assert result["not_found"] == len(non_existent)

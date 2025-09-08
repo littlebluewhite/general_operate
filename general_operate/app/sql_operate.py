@@ -290,14 +290,17 @@ class SQLOperate:
 
             if isinstance(value, list):
                 # Handle list values with IN clause
-                if not value:  # Empty list
+                if not value:  # Empty list - skip this filter
                     continue
-                # For PostgreSQL, we need to use ANY() with array parameter
+                # Database-specific handling for list parameters
                 if self._is_postgresql:
+                    # PostgreSQL has native array support with ANY() operator
+                    # This is more efficient than expanding parameters
                     where_clauses.append(f"{key} = ANY(:{key})")
                     params[key] = value  # PostgreSQL handles lists natively
                 else:
-                    # For MySQL, expand the parameters manually
+                    # MySQL doesn't have array support, so we expand parameters
+                    # This creates individual parameters for each list item
                     placeholders = [f":{key}_{i}" for i in range(len(value))]
                     where_clauses.append(f"{key} IN ({', '.join(placeholders)})")
                     for i, v in enumerate(value):
@@ -326,10 +329,157 @@ class SQLOperate:
     def _get_client(self) -> SQLClient:
         return self.__sqlClient
 
+    def _validate_create_data(self, data: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Validate and prepare data for insertion.
+        
+        Args:
+            data: Single record or list of records to validate
+            
+        Returns:
+            List of validated and cleaned data dictionaries
+        """
+        # Normalize input to list format
+        if isinstance(data, dict):
+            data_list = [data]
+        elif isinstance(data, list):
+            data_list = data
+        else:
+            raise self.__exc(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="Data must be a dictionary or list of dictionaries",
+                context=ErrorContext(operation="validation")
+            )
+
+        if not data_list:
+            return []
+
+        # Validate each item in the list
+        cleaned_data_list = []
+        for idx, item in enumerate(data_list):
+            if not isinstance(item, dict):
+                raise self.__exc(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=f"Item at index {idx} must be a dictionary",
+                    context=ErrorContext(operation="validation")
+                )
+
+            try:
+                cleaned_data = self._validate_data_dict(
+                    item, f"create operation (item {idx})"
+                )
+                cleaned_data_list.append(cleaned_data)
+            except Exception as e:
+                # Re-raise with more context
+                raise self.__exc(
+                    code=ErrorCode.VALIDATION_ERROR,
+                    message=f"Invalid data at index {idx}: {str(e)}",
+                    context=ErrorContext(operation="validation")
+                )
+
+        return cleaned_data_list
+    
+    def _build_insert_query(self, table_name: str, cleaned_data_list: list[dict]) -> tuple[str, dict]:
+        """Build INSERT query with parameters.
+        
+        Args:
+            table_name: Name of the table
+            cleaned_data_list: List of validated data dictionaries
+            
+        Returns:
+            Tuple of (query_string, parameters_dict)
+        """
+        if not cleaned_data_list:
+            return "", {}
+            
+        # Extract columns from first item (all should have same structure)
+        columns = list(cleaned_data_list[0].keys())
+        columns_str = ", ".join(columns)
+
+        # Build VALUES clause with numbered parameters
+        values_clauses = []
+        params = {}
+        
+        for i, data_item in enumerate(cleaned_data_list):
+            value_placeholders = []
+            for col in columns:
+                param_name = f"{col}_{i}"
+                value_placeholders.append(f":{param_name}")
+                params[param_name] = data_item.get(col)
+            values_clauses.append(f"({', '.join(value_placeholders)})")
+
+        # Build final query based on database type
+        if self._is_postgresql:
+            # PostgreSQL supports RETURNING clause for getting inserted records
+            query = f"INSERT INTO {table_name} ({columns_str}) VALUES {', '.join(values_clauses)} RETURNING *"
+        else:
+            # MySQL doesn't support RETURNING
+            query = f"INSERT INTO {table_name} ({columns_str}) VALUES {', '.join(values_clauses)}"
+            
+        return query, params
+    
+    async def _execute_postgresql_insert(
+        self, table_name: str, cleaned_data_list: list[dict], session: AsyncSession
+    ) -> list[dict[str, Any]]:
+        """Execute INSERT for PostgreSQL with RETURNING clause.
+        
+        Args:
+            table_name: Name of the table
+            cleaned_data_list: List of validated data
+            session: Database session
+            
+        Returns:
+            List of inserted records
+        """
+        query, params = self._build_insert_query(table_name, cleaned_data_list)
+        result = await session.execute(text(query), params)
+        rows = result.fetchall()
+        return [dict(row._mapping) for row in rows]
+    
+    async def _execute_mysql_insert(
+        self, table_name: str, cleaned_data_list: list[dict], session: AsyncSession
+    ) -> list[dict[str, Any]]:
+        """Execute INSERT for MySQL and fetch inserted records.
+        
+        Args:
+            table_name: Name of the table
+            cleaned_data_list: List of validated data
+            session: Database session
+            
+        Returns:
+            List of inserted records
+        """
+        query, params = self._build_insert_query(table_name, cleaned_data_list)
+        result = await session.execute(text(query), params)
+        
+        # Get the first inserted ID and row count
+        first_id = result.lastrowid
+        row_count = result.rowcount
+        
+        inserted_records = []
+        
+        # Fetch inserted records if we have auto-increment IDs
+        if first_id and row_count > 0:
+            # Assuming sequential auto-increment IDs
+            id_list = list(range(first_id, first_id + row_count))
+            
+            # Build SELECT query to fetch inserted records
+            placeholders = [f":id_{i}" for i in range(len(id_list))]
+            select_query = f"SELECT * FROM {table_name} WHERE id IN ({', '.join(placeholders)})"
+            select_params = {f"id_{i}": id_val for i, id_val in enumerate(id_list)}
+            
+            select_result = await session.execute(text(select_query), select_params)
+            rows = select_result.fetchall()
+            inserted_records = [dict(row._mapping) for row in rows]
+            
+        return inserted_records
+
     async def create_sql(
             self, table_name: str, data: dict[str, Any] | list[dict[str, Any]], session: AsyncSession = None
     ) -> list[dict[str, Any]]:
-        """Create multiple records in a single transaction for better performance
+        """Create multiple records in a single transaction for better performance.
+        
+        This method handles both single and bulk inserts with database-specific
+        optimizations for PostgreSQL and MySQL.
 
         Args:
             table_name: Name of the table to insert into
@@ -339,109 +489,30 @@ class SQLOperate:
         Returns:
             List of created records
         """
+        # Validate table name to prevent SQL injection
         self._validate_identifier(table_name, "table name")
-
-        # Handle single record input by wrapping in list
-        if isinstance(data, dict):
-            data_list = [data]
-        elif isinstance(data, list):
-            data_list = data
-        else:
-            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="Data must be a dictionary or list of dictionaries", context=ErrorContext(operation="validation"))
-
-        if not data_list:
-            return []
-
-        # Validate all data first
-        cleaned_data_list = []
-        for idx, item in enumerate(data_list):
-            if not isinstance(item, dict):
-                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Item at index {idx} must be a dictionary", context=ErrorContext(operation="validation"))
-
-            try:
-                cleaned_data = self._validate_data_dict(
-                    item, f"create operation (item {idx})"
-                )
-                cleaned_data_list.append(cleaned_data)
-            except Exception as e:
-                # Re-raise with more context
-                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Invalid data at index {idx}: {str(e)}", context=ErrorContext(operation="validation"))
-
+        
+        # Validate and clean input data
+        cleaned_data_list = self._validate_create_data(data)
         if not cleaned_data_list:
             return []
 
         # Helper function to execute the actual SQL operations
         async def _execute_insert(active_session: AsyncSession) -> list[dict[str, Any]]:
+            # Branch based on database type for optimal performance
+            # Each database has different capabilities and syntax
             if self._is_postgresql:
-                # PostgreSQL: Use VALUES with multiple rows and RETURNING
-                # Get columns from first item (all should have same structure)
-                columns = list(cleaned_data_list[0].keys())
-                columns_str = ", ".join(columns)
-
-                # Build VALUES clause with numbered parameters
-                values_clauses = []
-                params = {}
-                for i, data_item in enumerate(cleaned_data_list):
-                    value_placeholders = []
-                    for col in columns:
-                        param_name = f"{col}_{i}"
-                        value_placeholders.append(f":{param_name}")
-                        params[param_name] = data_item.get(col)
-                    values_clauses.append(f"({', '.join(value_placeholders)})")
-
-                query = f"INSERT INTO {table_name} ({columns_str}) VALUES {', '.join(values_clauses)} RETURNING *"
-                result = await active_session.execute(text(query), params)
-
-                rows = result.fetchall()
-                return [dict(row._mapping) for row in rows]
+                # PostgreSQL supports RETURNING clause for efficient retrieval
+                # This allows us to get inserted records in a single query
+                return await self._execute_postgresql_insert(
+                    table_name, cleaned_data_list, active_session
+                )
             else:
-                # MySQL: Use executemany or multiple INSERT statements
-                # MySQL doesn't support RETURNING, so we need to track inserted IDs
-                inserted_records = []
-
-                # Use a single INSERT with multiple VALUES for better performance
-                columns = list(cleaned_data_list[0].keys())
-                columns_str = ", ".join(columns)
-
-                # Build VALUES clause
-                values_clauses = []
-                params = {}
-                for i, data_item in enumerate(cleaned_data_list):
-                    value_placeholders = []
-                    for col in columns:
-                        param_name = f"{col}_{i}"
-                        value_placeholders.append(f":{param_name}")
-                        params[param_name] = data_item.get(col)
-                    values_clauses.append(f"({', '.join(value_placeholders)})")
-
-                query = f"INSERT INTO {table_name} ({columns_str}) VALUES {', '.join(values_clauses)}"
-                result = await active_session.execute(text(query), params)
-
-                # Get the first inserted ID and row count
-                first_id = result.lastrowid
-                row_count = result.rowcount
-
-                # Fetch all inserted records (assuming auto-increment ID)
-                if first_id and row_count > 0:
-                    # Assuming sequential auto-increment IDs
-                    id_list = list(range(first_id, first_id + row_count))
-                    if self._is_postgresql:
-                        select_query = f"SELECT * FROM {table_name} WHERE id = ANY(:id_list)"
-                        select_result = await active_session.execute(
-                            text(select_query), {"id_list": id_list}
-                        )
-                    else:
-                        # MySQL: expand parameters
-                        placeholders = [f":id_{i}" for i in range(len(id_list))]
-                        select_query = f"SELECT * FROM {table_name} WHERE id IN ({', '.join(placeholders)})"
-                        params = {f"id_{i}": id_val for i, id_val in enumerate(id_list)}
-                        select_result = await active_session.execute(
-                            text(select_query), params
-                        )
-                    rows = select_result.fetchall()
-                    inserted_records = [dict(row._mapping) for row in rows]
-
-                return inserted_records
+                # MySQL doesn't support RETURNING, so we need a follow-up SELECT
+                # This requires tracking inserted IDs and fetching them separately
+                return await self._execute_mysql_insert(
+                    table_name, cleaned_data_list, active_session
+                )
 
         # Use external session if provided, otherwise create and manage our own
         if session:
@@ -466,9 +537,33 @@ class SQLOperate:
             order_direction: str = "ASC",
             limit: int | None = None,
             offset: int = 0,
+            date_field: str | None = None,
+            start_date: Any = None,
+            end_date: Any = None,
             session: AsyncSession = None,
     ) -> list[dict[str, Any]]:
+        """Read data with optional date range filtering
+        
+        Args:
+            table_name: Name of the table to read from
+            filters: Optional filters to apply
+            order_by: Column to order by
+            order_direction: Order direction (ASC or DESC)
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+            date_field: Optional date field for range filtering
+            start_date: Optional start date for range filtering
+            end_date: Optional end date for range filtering
+            session: Optional external AsyncSession
+            
+        Returns:
+            List of records as dictionaries
+        """
         self._validate_identifier(table_name, "table name")
+
+        # Validate date_field if provided
+        if date_field:
+            self._validate_identifier(date_field, "date field")
 
         # Validate order_by column if provided
         if order_by:
@@ -489,9 +584,31 @@ class SQLOperate:
         async def _execute_read(active_session: AsyncSession) -> list[dict[str, Any]]:
             query = f"SELECT * FROM {table_name}"
 
-            # Add WHERE clause
-            where_clause, params = self._build_where_clause(filters)
-            query += where_clause
+            # Build WHERE clause with both filters and date range
+            where_conditions = []
+            params = {}
+
+            # Add standard filters
+            if filters:
+                where_clause, filter_params = self._build_where_clause(filters)
+                if where_clause:
+                    # Extract the conditions without the WHERE keyword
+                    where_conditions.append(where_clause.replace(" WHERE ", ""))
+                    params.update(filter_params)
+
+            # Add date range filters if date_field is specified
+            if date_field:
+                if start_date is not None:
+                    where_conditions.append(f"{date_field} >= :start_date")
+                    params["start_date"] = start_date
+
+                if end_date is not None:
+                    where_conditions.append(f"{date_field} <= :end_date")
+                    params["end_date"] = end_date
+
+            # Add WHERE clause if there are conditions
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
 
             # Add ORDER BY clause
             if order_by:
@@ -551,97 +668,6 @@ class SQLOperate:
             async with self.create_external_session() as auto_session:
                 return await _execute_count(auto_session)
 
-    async def read_sql_with_date_range(
-            self,
-            table_name: str,
-            filters: dict[str, Any] | None = None,
-            date_field: str = "created_at",
-            start_date: Any = None,
-            end_date: Any = None,
-            order_by: str | None = None,
-            order_direction: str = "DESC",
-            limit: int | None = None,
-            offset: int = 0,
-            session: AsyncSession = None,
-    ) -> list[dict[str, Any]]:
-        """Read data with date range filtering"""
-        self._validate_identifier(table_name, "table name")
-        self._validate_identifier(date_field, "date field")
-
-        if order_by:
-            self._validate_identifier(order_by, "order_by column name")
-
-        if order_direction.upper() not in ["ASC", "DESC"]:
-            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="order_direction must be 'ASC' or 'DESC'", context=ErrorContext(operation="validation"))
-
-        if limit is not None and limit <= 0:
-            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="limit must be a positive integer", context=ErrorContext(operation="validation"))
-
-        if offset < 0:
-            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="offset must be non-negative", context=ErrorContext(operation="validation"))
-
-        async def _execute_read_date_range(active_session: AsyncSession) -> list[dict[str, Any]]:
-            query = f"SELECT * FROM {table_name}"
-
-            # Build WHERE clause with date range
-            where_conditions = []
-            params = {}
-
-            # Add standard filters
-            if filters:
-                for key, value in filters.items():
-                    self._validate_identifier(key, "filter column name")
-                    if isinstance(value, list):
-                        # Handle IN clause for list values
-                        # Filter out null values from the list
-                        filtered_values = [v for v in value if v not in self.null_set]
-                        if filtered_values:  # Only add condition if there are non-null values
-                            placeholders = ", ".join([f":filter_{key}_{i}" for i in range(len(filtered_values))])
-                            where_conditions.append(f"{key} IN ({placeholders})")
-                            for i, v in enumerate(filtered_values):
-                                params[f"filter_{key}_{i}"] = v
-                    elif value not in self.null_set:
-                        where_conditions.append(f"{key} = :filter_{key}")
-                        params[f"filter_{key}"] = value
-
-            # Add date range filters
-            if start_date is not None:
-                where_conditions.append(f"{date_field} >= :start_date")
-                params["start_date"] = start_date
-
-            if end_date is not None:
-                where_conditions.append(f"{date_field} <= :end_date")
-                params["end_date"] = end_date
-
-            # Add WHERE clause if there are conditions
-            if where_conditions:
-                query += " WHERE " + " AND ".join(where_conditions)
-
-            # Add ORDER BY clause
-            if order_by:
-                query += f" ORDER BY {order_by} {order_direction.upper()}"
-
-            # Add LIMIT and OFFSET for pagination
-            if limit is not None:
-                if self._is_postgresql:
-                    query += f" LIMIT {limit} OFFSET {offset}"
-                else:  # MySQL
-                    query += f" LIMIT {offset}, {limit}"
-            elif offset > 0:
-                if self._is_postgresql:
-                    query += f" OFFSET {offset}"
-                else:  # MySQL requires LIMIT when using OFFSET
-                    query += f" LIMIT {offset}, 18446744073709551615"
-
-            result = await active_session.execute(text(query), params)
-            rows = result.fetchall()
-            return [dict(row._mapping) for row in rows]
-
-        if session:
-            return await _execute_read_date_range(session)
-        else:
-            async with self.create_external_session() as auto_session:
-                return await _execute_read_date_range(auto_session)
 
     async def read_sql_with_conditions(
             self,

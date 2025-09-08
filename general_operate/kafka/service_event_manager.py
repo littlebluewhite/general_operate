@@ -730,7 +730,11 @@ class ServiceEventManager:
                         "recovered_events": 0,
                         "permanently_failed_events": 0,
                     }
-            except Exception:
+            except (AttributeError, KeyError) as e:
+                # Log the specific error for debugging
+                self.logger.warning(
+                    f"Failed to retrieve DLQ metrics for {self.service_name}: {e}"
+                )
                 dlq_metrics = {
                     "total_dlq_events": 0,
                     "recovered_events": 0,

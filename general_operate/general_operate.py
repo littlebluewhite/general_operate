@@ -87,6 +87,62 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         finally:
             await session.close()
 
+    def _build_cache_key(self, record_id: Any) -> str:
+        """Build a cache key for a given record ID.
+        
+        Args:
+            record_id: The record ID
+            
+        Returns:
+            Formatted cache key string
+        """
+        return f"{self.table_name}:{record_id}"
+    
+    def _build_null_marker_key(self, record_id: Any) -> str:
+        """Build a null marker cache key for a given record ID.
+        
+        Args:
+            record_id: The record ID
+            
+        Returns:
+            Formatted null marker key string
+        """
+        return f"{self.table_name}:{record_id}:null"
+    
+    def _validate_with_schema(self, data: dict, schema_type: str = "main") -> Any:
+        """Validate data against specified schema type.
+        
+        Args:
+            data: Dictionary to validate
+            schema_type: Type of schema ("main", "create", "update")
+            
+        Returns:
+            Validated schema object
+            
+        Raises:
+            Exception: If validation fails
+        """
+        schema_map = {
+            "main": self.main_schemas,
+            "create": self.create_schemas,
+            "update": self.update_schemas
+        }
+        schema = schema_map.get(schema_type, self.main_schemas)
+        return schema(**data)
+    
+    def _process_in_batches(self, items: list, batch_size: int = 100):
+        """Generator to process items in batches.
+        
+        Args:
+            items: List of items to process
+            batch_size: Size of each batch (default: 100)
+            
+        Yields:
+            Batches of items
+        """
+        for i in range(0, len(items), batch_size):
+            yield items[i:i + batch_size]
+
     @abstractmethod
     def get_module(self):
         """
@@ -163,9 +219,132 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
 
         return {"success": True, "message": "Cache cleared successfully"}
 
+    async def _process_cache_lookups(self, id_value: set) -> tuple[list, set, set, list]:
+        """Process cache lookups for given IDs.
+        
+        Returns:
+            Tuple of (results, cache_miss_ids, null_marked_ids, failed_cache_ops)
+        """
+        results = []
+        cache_miss_ids = set()
+        null_marked_ids = set()
+        failed_cache_ops = []
+        
+        for id_key in id_value:
+            try:
+                # Check cache first to avoid database hit
+                # Null markers indicate records that were previously checked and don't exist
+                null_key = f"{self.table_name}:{id_key}:null"
+                is_null_marked = await self.redis.exists(null_key)
+
+                if is_null_marked:
+                    # Record was previously checked and doesn't exist in database
+                    # Skip further processing to avoid unnecessary DB queries
+                    null_marked_ids.add(id_key)
+                    continue
+
+                # Attempt to retrieve data from cache
+                # Cache hit means we can avoid expensive database query
+                cached_data = await self.get_caches(self.table_name, {str(id_key)})
+                if cached_data:
+                    # Parse and validate cached data against schema
+                    # This ensures data integrity even from cache
+                    for cache_item in cached_data:
+                        try:
+                            schema_data = self.main_schemas(**cache_item)
+                            results.append(schema_data)
+                        except Exception as schema_err:
+                            self.logger.warning(f"Schema validation failed for {self.table_name}:{id_key}: {schema_err}")
+                            cache_miss_ids.add(id_key)
+                else:
+                    cache_miss_ids.add(id_key)
+
+            except (redis.RedisError, Exception) as cache_err:
+                # Cache failures are non-fatal - fall back to database
+                # Track failed operations to avoid retry attempts
+                self.logger.warning(f"Cache operation failed for {self.table_name}:{id_key}: {cache_err}")
+                failed_cache_ops.append(id_key)
+                cache_miss_ids.add(id_key)
+                
+        return results, cache_miss_ids, null_marked_ids, failed_cache_ops
+    
+    async def _handle_cache_misses(self, cache_miss_ids: set, failed_cache_ops: list) -> tuple[list, set]:
+        """Handle cache misses by fetching from SQL and processing results.
+        
+        Returns:
+            Tuple of (schema_results, found_ids)
+        """
+        if not cache_miss_ids:
+            return [], set()
+            
+        sql_results = await self._fetch_from_sql(cache_miss_ids)
+        schema_results = []
+        found_ids = set()
+        cache_data_to_set = {}
+
+        for sql_row in sql_results:
+            if sql_row:
+                try:
+                    # Convert SQL result to schema object
+                    schema_data = self.main_schemas(**sql_row)
+                    schema_results.append(schema_data)
+
+                    # Prepare for cache update (skip if cache operation previously failed)
+                    # This avoids attempting cache operations that are likely to fail again
+                    if sql_row["id"] not in failed_cache_ops:
+                        found_ids.add(sql_row["id"])
+                        cache_data_to_set[str(sql_row["id"])] = sql_row
+                except Exception as schema_err:
+                    self.logger.error(f"Schema validation failed for SQL result {sql_row.get('id', 'unknown')}: {schema_err}")
+                    continue
+
+        # Update cache with fetched data
+        if cache_data_to_set:
+            await self._update_cache_after_fetch(cache_data_to_set)
+            
+        return schema_results, found_ids
+    
+    async def _update_cache_after_fetch(self, cache_data: dict) -> None:
+        """Update cache with data fetched from SQL.
+        
+        Args:
+            cache_data: Dictionary mapping cache keys to data
+        """
+        try:
+            cache_success = await self.store_caches(self.table_name, cache_data)
+            if not cache_success:
+                self.logger.warning(f"Cache write failed for {len(cache_data)} items")
+        except Exception as cache_err:
+            # Cache update failures are non-fatal - log and continue
+            self.logger.warning(f"Cache write error: {cache_err}")
+    
+    async def _mark_missing_records(self, missing_ids: set, failed_cache_ops: list) -> None:
+        """Mark records that don't exist in database with null markers.
+        
+        Args:
+            missing_ids: Set of IDs that don't exist in database
+            failed_cache_ops: List of IDs where cache operations failed
+        """
+        for missing_id in missing_ids:
+            # Skip IDs where cache operations previously failed
+            if missing_id not in failed_cache_ops:
+                try:
+                    null_key = f"{self.table_name}:{missing_id}:null"
+                    # Set null marker with 5-minute expiry to avoid repeated DB lookups
+                    await self.set_null_key(null_key, 300)
+                except Exception as null_err:
+                    self.logger.warning(f"Failed to set null marker for {missing_id}: {null_err}")
+
     @handle_errors(operation="read_data_by_id")
     async def read_data_by_id(self, id_value: set) -> list[T]:
-        """Read data with cache-first strategy and null value protection"""
+        """Read data with cache-first strategy and null value protection.
+        
+        This method implements a multi-tier data retrieval strategy:
+        1. Check cache for existing data and null markers
+        2. For cache misses, fetch from SQL database
+        3. Update cache with fetched data
+        4. Mark non-existent records to avoid repeated lookups
+        """
         if not id_value:
             return []
 
@@ -173,85 +352,19 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         self.logger.debug(f"Starting {operation_context}")
 
         try:
-            results = []
-            cache_miss_ids = set()
-            null_marked_ids = set()
-            failed_cache_ops = []
-
-            # 1. Try to get data from cache
-            for id_key in id_value:
-                try:
-                    # Check for null marker first
-                    null_key = f"{self.table_name}:{id_key}:null"
-                    is_null_marked = await self.redis.exists(null_key)
-
-                    if is_null_marked:
-                        null_marked_ids.add(id_key)
-                        continue
-
-                    # Try to get actual data from cache
-                    cached_data = await self.get_caches(self.table_name, {str(id_key)})
-                    if cached_data:
-                        # Parse cached data and convert to schema
-                        for cache_item in cached_data:
-                            # cache_item is already the parsed dict data from get_caches
-                            try:
-                                schema_data = self.main_schemas(**cache_item)
-                                results.append(schema_data)
-                            except Exception as schema_err:
-                                self.logger.warning(f"Schema validation failed for {self.table_name}:{id_key}: {schema_err}")
-                                cache_miss_ids.add(id_key)
-                    else:
-                        cache_miss_ids.add(id_key)
-
-                except (redis.RedisError, Exception) as cache_err:
-                    self.logger.warning(f"Cache operation failed for {self.table_name}:{id_key}: {cache_err}")
-                    failed_cache_ops.append(id_key)
-                    cache_miss_ids.add(id_key)
-
-            # 2. For cache misses, read from SQL
+            # Step 1: Process cache lookups
+            results, cache_miss_ids, null_marked_ids, failed_cache_ops = await self._process_cache_lookups(id_value)
+            
+            # Step 2: Handle cache misses with SQL fallback
             if cache_miss_ids:
                 try:
-                    sql_results = await self._fetch_from_sql(cache_miss_ids)
-
-                    # Process SQL results
-                    found_ids = set()
-                    cache_data_to_set = {}
-
-                    for sql_row in sql_results:
-                        if sql_row:
-                            try:
-                                # Convert to main schema
-                                schema_data = self.main_schemas(**sql_row)
-                                results.append(schema_data)
-
-                                # Prepare for cache storage (only if cache is working)
-                                if sql_row["id"] not in failed_cache_ops:
-                                    found_ids.add(sql_row["id"])
-                                    cache_data_to_set[str(sql_row["id"])] = sql_row
-                            except Exception as schema_err:
-                                self.logger.error(f"Schema validation failed for SQL result {sql_row.get('id', 'unknown')}: {schema_err}")
-                                continue
-
-                    # 3. Cache the found data (with error resilience)
-                    if cache_data_to_set:
-                        try:
-                            cache_success = await self.store_caches(self.table_name, cache_data_to_set)
-                            if not cache_success:
-                                self.logger.warning(f"Cache write failed for {len(cache_data_to_set)} items in {operation_context}")
-                        except Exception as cache_err:
-                            self.logger.warning(f"Cache write error in {operation_context}: {cache_err}")
-
-                    # 4. Mark missing IDs with null values (5 minutes expiry)
+                    sql_results, found_ids = await self._handle_cache_misses(cache_miss_ids, failed_cache_ops)
+                    results.extend(sql_results)
+                    
+                    # Step 3: Mark missing records with null markers
                     missing_ids = cache_miss_ids - found_ids
-                    for missing_id in missing_ids:
-                        if missing_id not in failed_cache_ops:
-                            try:
-                                null_key = f"{self.table_name}:{missing_id}:null"
-                                await self.set_null_key(null_key, 300)  # 5 minutes
-                            except Exception as null_err:
-                                self.logger.warning(f"Failed to set null marker for {missing_id}: {null_err}")
-
+                    await self._mark_missing_records(missing_ids, failed_cache_ops)
+                    
                 except Exception as sql_err:
                     self.logger.error(f"SQL fallback failed in {operation_context}: {sql_err}")
                     raise self.__exc(
@@ -418,9 +531,109 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         # 批量創建實體
         return await self.create_data(create_data_list, session=session)
 
+    async def _validate_update_data(self, data: list[dict[str, Any]], where_field: str) -> tuple[list, list, list]:
+        """Validate update data and prepare for bulk operations.
+        
+        Returns:
+            Tuple of (update_list, cache_keys_to_delete, validation_errors)
+        """
+        update_list = []
+        cache_keys_to_delete = []
+        validation_errors = []
+
+        for idx, update_item in enumerate(data):
+            # Check for required where_field
+            if where_field not in update_item:
+                validation_errors.append(f"Item {idx}: Missing '{where_field}' field")
+                continue
+
+            where_value = update_item[where_field]
+
+            try:
+                # Validate against update schema
+                update_schema_item = self.update_schemas(**update_item)
+                validated_update_data = update_schema_item.model_dump(exclude_unset=True)
+
+                # Remove where_field from update data to avoid updating it
+                validated_update_data = {k: v for k, v in validated_update_data.items() if k != where_field}
+
+                # Skip items with no valid update fields
+                if not validated_update_data:
+                    self.logger.warning(f"Item {idx}: No valid update fields after validation")
+                    continue
+
+                # Prepare for bulk update
+                update_list.append({where_field: where_value, "data": validated_update_data})
+
+                # Track cache keys for ID-based updates only
+                if where_field == "id":
+                    cache_keys_to_delete.append(str(where_value))
+
+            except Exception as e:
+                validation_errors.append(f"Item {idx}: {str(e)}")
+                
+        return update_list, cache_keys_to_delete, validation_errors
+    
+    async def _clear_update_caches(self, cache_keys: list, operation_context: str) -> list:
+        """Clear cache entries before/after update operations.
+        
+        Returns:
+            List of cache deletion errors (for logging)
+        """
+        cache_delete_errors = []
+        
+        if not cache_keys:
+            return cache_delete_errors
+            
+        try:
+            # Delete main cache entries
+            deleted_count = await CacheOperate.delete_caches(self, self.table_name, set(cache_keys))
+            self.logger.debug(f"Cache cleanup: deleted {deleted_count} entries")
+
+            # Delete null markers for ID-based cache keys
+            for record_id in cache_keys:
+                null_key = f"{self.table_name}:{record_id}:null"
+                try:
+                    await self.delete_null_key(null_key)
+                except Exception as null_err:
+                    cache_delete_errors.append(f"null marker {record_id}: {null_err}")
+
+        except Exception as cache_err:
+            cache_delete_errors.append(f"cache cleanup: {cache_err}")
+            self.logger.warning(f"Cache cleanup failed in {operation_context}: {cache_err}")
+            
+        return cache_delete_errors
+    
+    async def _convert_update_results(self, updated_records: list) -> tuple[list, list]:
+        """Convert updated records to schema objects.
+        
+        Returns:
+            Tuple of (results, schema_errors)
+        """
+        results = []
+        schema_errors = []
+
+        for idx, record in enumerate(updated_records):
+            if record:
+                try:
+                    schema_data = self.main_schemas(**record)
+                    results.append(schema_data)
+                except Exception as schema_err:
+                    schema_errors.append(f"Record {idx}: {schema_err}")
+                    self.logger.error(f"Schema conversion failed for updated record {record.get('id', idx)}: {schema_err}")
+                    
+        return results, schema_errors
+
     @handle_errors(operation="update_data")
     async def update_data(self, data: list[dict[str, Any]], where_field: str = "id", session=None) -> list[T]:
-        """Update data with bulk operations and enhanced cache consistency
+        """Update data with bulk operations and enhanced cache consistency.
+        
+        This method performs bulk updates with the following strategy:
+        1. Validate all update data against schemas
+        2. Clear cache entries before update (for consistency)
+        3. Execute bulk SQL update
+        4. Clear cache entries after update (ensure consistency)
+        5. Return updated records as schema objects
 
         Args:
             data: List of dictionaries containing update data, each must include the where_field
@@ -433,42 +646,10 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         operation_context = f"update_data(table={self.table_name}, records={len(data)}, field={where_field})"
         self.logger.debug(f"Starting {operation_context}")
 
-        # Prepare data for bulk update
-        update_list = []
-        cache_keys_to_delete = []
-        validation_errors = []
-
-        for idx, update_item in enumerate(data):
-            if where_field not in update_item:
-                validation_errors.append(f"Item {idx}: Missing '{where_field}' field")
-                continue
-
-            where_value = update_item[where_field]
-
-            try:
-                # Validate with update schema
-                update_schema_item = self.update_schemas(**update_item)
-                validated_update_data = update_schema_item.model_dump(exclude_unset=True)
-
-                # Extract update fields (excluding the where_field)
-                validated_update_data = {k: v for k, v in validated_update_data.items() if k != where_field}
-
-                # Validate update data
-                if not validated_update_data:
-                    self.logger.warning(f"Item {idx}: No valid update fields after validation")
-                    continue
-
-                # Add to bulk update list in new format
-                update_list.append({where_field: where_value, "data": validated_update_data})
-
-                # Prepare cache keys for deletion (only for id-based updates)
-                if where_field == "id":
-                    cache_keys_to_delete.append(str(where_value))
-
-            except Exception as e:
-                validation_errors.append(f"Item {idx}: {str(e)}")
-
-        # Report validation errors if any
+        # Step 1: Validate and prepare update data
+        update_list, cache_keys_to_delete, validation_errors = await self._validate_update_data(data, where_field)
+        
+        # Handle validation errors
         if validation_errors:
             error_msg = "Validation errors: " + "; ".join(validation_errors)
             self.logger.error(f"{operation_context} - {error_msg}")
@@ -482,60 +663,28 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             self.logger.warning(f"{operation_context} - No valid update data after validation")
             return []
 
-        cache_delete_errors = []
+        # Step 2: Pre-update cache cleanup (best effort)
+        cache_delete_errors = await self._clear_update_caches(cache_keys_to_delete, operation_context)
 
-        # 1. Pre-update cache cleanup (best effort)
-        if cache_keys_to_delete:
-            try:
-                deleted_count = await CacheOperate.delete_caches(self, self.table_name, set(cache_keys_to_delete))
-                self.logger.debug(f"Pre-update cache cleanup: deleted {deleted_count} entries")
-
-                # Also delete null markers if they exist (only for id-based updates)
-                for record_id in cache_keys_to_delete:
-                    null_key = f"{self.table_name}:{record_id}:null"
-                    try:
-                        await self.delete_null_key(null_key)
-                    except Exception as null_err:
-                        cache_delete_errors.append(f"null marker {record_id}: {null_err}")
-
-            except Exception as cache_err:
-                cache_delete_errors.append(f"pre-update cleanup: {cache_err}")
-                self.logger.warning(f"Pre-update cache cleanup failed in {operation_context}: {cache_err}")
-
-        # 2. Bulk update SQL data
+        # Step 3: Execute bulk SQL update
         try:
             updated_records = await self.update_sql(self.table_name, update_list, where_field, session=session)
         except Exception as sql_err:
             self.logger.error(f"SQL update failed in {operation_context}: {sql_err}")
             raise
 
-        # Convert to main schemas with error handling
-        results = []
-        schema_errors = []
+        # Step 4: Convert results to schema objects
+        results, schema_errors = await self._convert_update_results(updated_records)
 
-        for idx, record in enumerate(updated_records):
-            if record:
-                try:
-                    schema_data = self.main_schemas(**record)
-                    results.append(schema_data)
-                except Exception as schema_err:
-                    schema_errors.append(f"Record {idx}: {schema_err}")
-                    self.logger.error(f"Schema conversion failed for updated record {record.get('id', idx)}: {schema_err}")
-
-        # 3. Post-update cache cleanup (ensure consistency)
-        if cache_keys_to_delete:
-            try:
-                deleted_count = await CacheOperate.delete_caches(self, self.table_name, set(cache_keys_to_delete))
-                self.logger.debug(f"Post-update cache cleanup: deleted {deleted_count} entries")
-            except Exception as cache_err:
-                cache_delete_errors.append(f"post-update cleanup: {cache_err}")
-                self.logger.warning(f"Post-update cache cleanup failed in {operation_context}: {cache_err}")
+        # Step 5: Post-update cache cleanup (ensure consistency)
+        post_cache_errors = await self._clear_update_caches(cache_keys_to_delete, operation_context)
+        cache_delete_errors.extend(post_cache_errors)
 
         # Log cache operation issues (non-fatal)
         if cache_delete_errors:
             self.logger.warning(f"Cache delete errors in {operation_context}: {'; '.join(cache_delete_errors)}")
 
-        # Validate that all records were updated successfully
+        # Validate update completeness
         if len(results) != len(update_list):
             missing_count = len(update_list) - len(results)
             error_msg = f"Update incomplete: {missing_count} of {len(update_list)} records failed to update"
@@ -983,27 +1132,45 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         result = {}
         unchecked_ids = set()
         
-        # Check cache first
-        for id_val in id_values:
+        # Check cache first using pipeline for better performance
+        if self.redis:
             try:
-                # Check for null marker
-                null_key = f"{self.table_name}:{id_val}:null"
-                is_null_marked = await self.redis.exists(null_key)
-                
-                if is_null_marked:
-                    result[id_val] = False
-                    continue
-                
-                # Try to get from cache
-                cached_data = await self.get_caches(self.table_name, {str(id_val)})
-                if cached_data:
-                    result[id_val] = True
-                else:
-                    unchecked_ids.add(id_val)
+                # Use Redis pipeline for batch operations
+                async with self.redis.pipeline(transaction=False) as pipe:
+                    # Queue all null marker checks
+                    null_keys = {}
+                    for id_val in id_values:
+                        null_key = f"{self.table_name}:{id_val}:null"
+                        null_keys[id_val] = null_key
+                        pipe.exists(null_key)  # Pipeline queues the command
                     
+                    # Execute all null marker checks at once
+                    null_results = await pipe.execute()
+                
+                # Process null marker results
+                non_null_ids = []
+                for id_val, is_null_marked in zip(id_values, null_results):
+                    if is_null_marked:
+                        result[id_val] = False
+                    else:
+                        non_null_ids.append(id_val)
+                
+                # Check cache for non-null IDs
+                if non_null_ids:
+                    cached_data = await self.get_caches(self.table_name, {str(id_val) for id_val in non_null_ids})
+                    for id_val in non_null_ids:
+                        if str(id_val) in cached_data:
+                            result[id_val] = True
+                        else:
+                            unchecked_ids.add(id_val)
+                            
             except Exception as cache_err:
-                self.logger.warning(f"Cache check failed for ID {id_val}: {cache_err}")
-                unchecked_ids.add(id_val)
+                self.logger.warning(f"Cache pipeline check failed: {cache_err}")
+                # Fallback: all IDs need database check
+                unchecked_ids = set(id_values)
+        else:
+            # No Redis, check all in database
+            unchecked_ids = set(id_values)
         
         # Check database for remaining IDs
         if unchecked_ids:
@@ -1024,8 +1191,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                         try:
                             null_key = f"{self.table_name}:{id_val}:null"
                             await self.set_null_key(null_key, 300)  # 5 minutes
-                        except:
-                            pass
+                        except (redis.RedisError, ConnectionError) as e:
+                            # Log but don't fail the operation for cache issues
+                            self.logger.debug(f"Failed to set null marker for {id_val}: {e}")
                             
             except Exception as e:
                 self.logger.error(f"Database check failed in {operation_context}: {str(e)}")
@@ -1062,13 +1230,17 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             cache_keys = {str(id_val) for id_val in id_values}
             await self.delete_caches(self.table_name, cache_keys)
             
-            # Clear null markers
-            for id_val in id_values:
-                null_key = f"{self.table_name}:{id_val}:null"
+            # Clear null markers using pipeline for better performance
+            if self.redis:
                 try:
-                    await self.delete_null_key(null_key)
-                except:
-                    pass
+                    async with self.redis.pipeline(transaction=False) as pipe:
+                        for id_val in id_values:
+                            null_key = f"{self.table_name}:{id_val}:null"
+                            pipe.delete(null_key)  # Queue delete operation
+                        await pipe.execute()  # Execute all deletes at once
+                except (redis.RedisError, ConnectionError) as e:
+                    # Log but don't fail - cache clear is best effort
+                    self.logger.debug(f"Failed to clear null markers in bulk: {e}")
             
             # Fetch fresh data from database
             sql_results = await self.read_sql(
@@ -1091,18 +1263,36 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 if cache_data_to_set:
                     await self.store_caches(self.table_name, cache_data_to_set)
                 
-                # Mark missing IDs with null markers
+                # Mark missing IDs with null markers using pipeline
                 missing_ids = id_values - found_ids
-                for missing_id in missing_ids:
-                    null_key = f"{self.table_name}:{missing_id}:null"
-                    await self.set_null_key(null_key, 300)  # 5 minutes
-                    not_found += 1
+                if missing_ids and self.redis:
+                    try:
+                        async with self.redis.pipeline(transaction=False) as pipe:
+                            for missing_id in missing_ids:
+                                null_key = f"{self.table_name}:{missing_id}:null"
+                                pipe.setex(null_key, 300, "1")  # Queue setex operation
+                                not_found += 1
+                            await pipe.execute()  # Execute all at once
+                    except (redis.RedisError, ConnectionError) as e:
+                        self.logger.debug(f"Failed to set null markers in bulk: {e}")
+                        not_found = len(missing_ids)
+                else:
+                    not_found = len(missing_ids)
             else:
-                # All IDs not found
-                for id_val in id_values:
-                    null_key = f"{self.table_name}:{id_val}:null"
-                    await self.set_null_key(null_key, 300)
-                    not_found += 1
+                # All IDs not found - use pipeline for setting null markers
+                if self.redis:
+                    try:
+                        async with self.redis.pipeline(transaction=False) as pipe:
+                            for id_val in id_values:
+                                null_key = f"{self.table_name}:{id_val}:null"
+                                pipe.setex(null_key, 300, "1")  # Queue setex operation
+                                not_found += 1
+                            await pipe.execute()  # Execute all at once
+                    except (redis.RedisError, ConnectionError) as e:
+                        self.logger.debug(f"Failed to set null markers in bulk: {e}")
+                        not_found = len(id_values)
+                else:
+                    not_found = len(id_values)
                     
         except Exception as e:
             self.logger.error(f"Error in {operation_context}: {str(e)}")

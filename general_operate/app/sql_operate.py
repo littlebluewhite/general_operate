@@ -3,10 +3,10 @@ import functools
 import json
 import re
 from typing import Any
-import structlog
 
 import asyncpg
 import pymysql
+import structlog
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.exc import DBAPIError
@@ -28,7 +28,7 @@ class SQLOperate:
 
         # Detect database type for compatibility
         self._is_postgresql = client.engine_type.lower() == "postgresql"
-        
+
         # Initialize logger
         self.logger = structlog.get_logger().bind(
             operator=self.__class__.__name__
@@ -524,7 +524,10 @@ class SQLOperate:
                 return await _execute_read(auto_session)
 
     async def count_sql(
-            self, table_name: str, filters: dict[str, Any] | None = None, session: AsyncSession = None
+        self,
+        table_name: str,
+        filters: dict[str, Any] | None = None,
+        session: AsyncSession = None,
     ) -> int:
         """Get the total count of records in a table with optional filters"""
         self._validate_identifier(table_name, "table name")
@@ -1051,6 +1054,289 @@ class SQLOperate:
                 except Exception as e:
                     await auto_session.rollback()
                     raise e
+
+    async def upsert_sql(
+        self,
+        table_name: str,
+        data: list[dict[str, Any]],
+        conflict_fields: list[str],
+        update_fields: list[str] = None,
+        session: AsyncSession = None
+    ) -> list[dict[str, Any]]:
+        """Insert records or update if they already exist (UPSERT)
+        
+        Uses ON CONFLICT for PostgreSQL and ON DUPLICATE KEY UPDATE for MySQL
+        
+        Args:
+            table_name: Name of the table to upsert into
+            data: List of records to insert or update
+            conflict_fields: Fields that determine uniqueness (e.g., ["id"] or ["user_id", "item_id"])
+            update_fields: Fields to update on conflict (if None, updates all fields except conflict_fields)
+            session: Optional external AsyncSession for transaction management
+            
+        Returns:
+            List of upserted records
+        """
+        self._validate_identifier(table_name, "table name")
+        
+        # Validate conflict fields
+        for field in conflict_fields:
+            self._validate_identifier(field, "conflict field")
+        
+        # Handle single record input by wrapping in list
+        if isinstance(data, dict):
+            data_list = [data]
+        elif isinstance(data, list):
+            data_list = data
+        else:
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="Data must be a dictionary or list of dictionaries", context=ErrorContext(operation="validation"))
+        
+        if not data_list:
+            return []
+        
+        # Validate all data first
+        cleaned_data_list = []
+        for idx, item in enumerate(data_list):
+            if not isinstance(item, dict):
+                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Item at index {idx} must be a dictionary", context=ErrorContext(operation="validation"))
+            
+            try:
+                cleaned_data = self._validate_data_dict(item, f"upsert operation (item {idx})")
+                cleaned_data_list.append(cleaned_data)
+            except Exception as e:
+                raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message=f"Invalid data at index {idx}: {str(e)}", context=ErrorContext(operation="validation"))
+        
+        if not cleaned_data_list:
+            return []
+        
+        # Get columns from first item
+        all_columns = list(cleaned_data_list[0].keys())
+        
+        # Determine fields to update
+        if update_fields is None:
+            # Update all fields except conflict fields
+            update_fields = [col for col in all_columns if col not in conflict_fields]
+        else:
+            # Validate update fields
+            for field in update_fields:
+                self._validate_identifier(field, "update field")
+        
+        # Helper function to execute the actual SQL operations
+        async def _execute_upsert(active_session: AsyncSession) -> list[dict[str, Any]]:
+            if self._is_postgresql:
+                # PostgreSQL: Use INSERT ... ON CONFLICT ... DO UPDATE
+                columns_str = ", ".join(all_columns)
+                
+                # Build VALUES clause with numbered parameters
+                values_clauses = []
+                params = {}
+                for i, data_item in enumerate(cleaned_data_list):
+                    value_placeholders = []
+                    for col in all_columns:
+                        param_name = f"{col}_{i}"
+                        value_placeholders.append(f":{param_name}")
+                        params[param_name] = data_item.get(col)
+                    values_clauses.append(f"({', '.join(value_placeholders)})")
+                
+                # Build ON CONFLICT clause
+                conflict_str = ", ".join(conflict_fields)
+                
+                # Build DO UPDATE SET clause
+                update_clauses = []
+                for field in update_fields:
+                    update_clauses.append(f"{field} = EXCLUDED.{field}")
+                update_str = ", ".join(update_clauses)
+                
+                query = f"""
+                    INSERT INTO {table_name} ({columns_str})
+                    VALUES {', '.join(values_clauses)}
+                    ON CONFLICT ({conflict_str}) DO UPDATE SET {update_str}
+                    RETURNING *
+                """
+                
+                result = await active_session.execute(text(query), params)
+                rows = result.fetchall()
+                return [dict(row._mapping) for row in rows]
+                
+            else:
+                # MySQL: Use INSERT ... ON DUPLICATE KEY UPDATE
+                columns_str = ", ".join(all_columns)
+                
+                # Build VALUES clause
+                values_clauses = []
+                params = {}
+                for i, data_item in enumerate(cleaned_data_list):
+                    value_placeholders = []
+                    for col in all_columns:
+                        param_name = f"{col}_{i}"
+                        value_placeholders.append(f":{param_name}")
+                        params[param_name] = data_item.get(col)
+                    values_clauses.append(f"({', '.join(value_placeholders)})")
+                
+                # Build ON DUPLICATE KEY UPDATE clause
+                update_clauses = []
+                for field in update_fields:
+                    update_clauses.append(f"{field} = VALUES({field})")
+                update_str = ", ".join(update_clauses)
+                
+                query = f"""
+                    INSERT INTO {table_name} ({columns_str})
+                    VALUES {', '.join(values_clauses)}
+                    ON DUPLICATE KEY UPDATE {update_str}
+                """
+                
+                result = await active_session.execute(text(query), params)
+                
+                # MySQL doesn't support RETURNING, need to fetch the records
+                # Build a query to fetch all affected records
+                where_conditions = []
+                fetch_params = {}
+                
+                for i, data_item in enumerate(cleaned_data_list):
+                    field_conditions = []
+                    for field in conflict_fields:
+                        param_name = f"fetch_{field}_{i}"
+                        field_conditions.append(f"{field} = :{param_name}")
+                        fetch_params[param_name] = data_item.get(field)
+                    where_conditions.append(f"({' AND '.join(field_conditions)})")
+                
+                fetch_query = f"SELECT * FROM {table_name} WHERE {' OR '.join(where_conditions)}"
+                fetch_result = await active_session.execute(text(fetch_query), fetch_params)
+                rows = fetch_result.fetchall()
+                return [dict(row._mapping) for row in rows]
+        
+        # Use external session if provided, otherwise create and manage our own
+        if session:
+            return await _execute_upsert(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                try:
+                    result = await _execute_upsert(auto_session)
+                    await auto_session.commit()
+                    return result
+                except Exception as e:
+                    await auto_session.rollback()
+                    raise e
+
+    async def exists_sql(
+        self,
+        table_name: str,
+        id_values: list[Any],
+        id_column: str = "id",
+        session: AsyncSession = None
+    ) -> dict[Any, bool]:
+        """Check which records exist in the database
+        
+        Returns a dictionary mapping each ID to its existence status
+        
+        Args:
+            table_name: Name of the table to check
+            id_values: List of IDs to check
+            id_column: Name of the ID column (default: "id")
+            session: Optional external AsyncSession
+            
+        Returns:
+            Dictionary mapping each ID to True (exists) or False (doesn't exist)
+        """
+        self._validate_identifier(table_name, "table name")
+        self._validate_identifier(id_column, "id column name")
+        
+        if not id_values:
+            return {}
+        
+        # Initialize result with all IDs as False
+        result = {id_val: False for id_val in id_values}
+        
+        # Helper function to execute the actual SQL operations
+        async def _execute_exists(active_session: AsyncSession) -> dict[Any, bool]:
+            if len(id_values) == 1:
+                # Single ID check
+                query = f"SELECT {id_column} FROM {table_name} WHERE {id_column} = :id_value"
+                sql_result = await active_session.execute(text(query), {"id_value": id_values[0]})
+                row = sql_result.fetchone()
+                if row:
+                    result[id_values[0]] = True
+            else:
+                # Multiple IDs check
+                if self._is_postgresql:
+                    query = f"SELECT {id_column} FROM {table_name} WHERE {id_column} = ANY(:id_list)"
+                    sql_result = await active_session.execute(text(query), {"id_list": id_values})
+                else:
+                    # MySQL: expand parameters
+                    placeholders = [f":id_{i}" for i in range(len(id_values))]
+                    query = f"SELECT {id_column} FROM {table_name} WHERE {id_column} IN ({', '.join(placeholders)})"
+                    params = {f"id_{i}": id_val for i, id_val in enumerate(id_values)}
+                    sql_result = await active_session.execute(text(query), params)
+                
+                # Mark existing IDs as True
+                rows = sql_result.fetchall()
+                for row in rows:
+                    id_val = row[0]
+                    if id_val in result:
+                        result[id_val] = True
+            
+            return result
+        
+        # Use external session if provided, otherwise create our own
+        if session:
+            return await _execute_exists(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                return await _execute_exists(auto_session)
+
+    async def get_distinct_values(
+        self,
+        table_name: str,
+        field: str,
+        filters: dict[str, Any] = None,
+        limit: int = None,
+        session: AsyncSession = None
+    ) -> list[Any]:
+        """Get distinct values from a specific column
+        
+        Args:
+            table_name: Name of the table
+            field: Column name to get distinct values from
+            filters: Optional filters to apply
+            limit: Maximum number of distinct values to return
+            session: Optional external AsyncSession
+            
+        Returns:
+            List of distinct values from the specified column
+        """
+        self._validate_identifier(table_name, "table name")
+        self._validate_identifier(field, "field name")
+        
+        if limit is not None and limit <= 0:
+            raise self.__exc(code=ErrorCode.VALIDATION_ERROR, message="limit must be a positive integer", context=ErrorContext(operation="validation"))
+        
+        # Helper function to execute the actual SQL operations
+        async def _execute_distinct(active_session: AsyncSession) -> list[Any]:
+            query = f"SELECT DISTINCT {field} FROM {table_name}"
+            
+            # Add WHERE clause
+            where_clause, params = self._build_where_clause(filters)
+            query += where_clause
+            
+            # Add ORDER BY for consistent results
+            query += f" ORDER BY {field}"
+            
+            # Add LIMIT if specified
+            if limit is not None:
+                query += f" LIMIT {limit}"
+            
+            result = await active_session.execute(text(query), params)
+            rows = result.fetchall()
+            
+            # Extract values from rows
+            return [row[0] for row in rows if row[0] is not None]
+        
+        # Use external session if provided, otherwise create our own
+        if session:
+            return await _execute_distinct(session)
+        else:
+            async with self.create_external_session() as auto_session:
+                return await _execute_distinct(auto_session)
 
     async def execute_query(
             self, query: str, params: dict[str, Any] | None = None

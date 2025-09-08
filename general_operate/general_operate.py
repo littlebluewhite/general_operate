@@ -723,6 +723,46 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             self.logger.error(f"Error in delete_filter_data: {type(e).__name__}: {str(e)}")
             return []
 
+    @handle_errors(operation="count_data")
+    async def count_data(
+        self,
+        filters: dict[str, Any] | None = None,
+        session=None
+    ) -> int:
+        """Count records in the table with optional filters
+        
+        Args:
+            filters: Optional dictionary of filter conditions
+            session: Optional AsyncSession for transaction management
+            
+        Returns:
+            int: The count of records matching the filters
+        """
+        operation_context = f"count_data(table={self.table_name}, filters={filters})"
+        self.logger.debug(f"Starting {operation_context}")
+        
+        try:
+            # Use count_sql from SQLOperate
+            count = await self.count_sql(
+                table_name=self.table_name,
+                filters=filters,
+                session=session
+            )
+            
+            self.logger.debug(f"Completed {operation_context}, count={count}")
+            return count
+            
+        except self.__exc:
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error in {operation_context}: {str(e)}")
+            raise self.__exc(
+                code=ErrorCode.UNKNOWN_ERROR,
+                message=f"Unexpected error during count operation: {str(e)}",
+                context=ErrorContext(operation="count_data", resource=self.table_name),
+                cause=e
+            )
+
     async def store_cache_data(
             self, prefix: str, identifier: str, data: dict[str, Any], ttl_seconds: int | None = None
     ) -> None:
@@ -757,3 +797,389 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
     async def delete_cache_data(self, prefix: str, identifier: str) -> bool:
         """Delete data from Redis cache"""
         return await self.delete_cache(prefix, identifier)
+
+    @handle_errors(operation="upsert_data")
+    async def upsert_data(
+        self,
+        data: list[dict],
+        conflict_fields: list[str],
+        update_fields: list[str] = None,
+        session=None
+    ) -> list[T]:
+        """Insert or update data with schema validation and cache management
+        
+        Args:
+            data: List of dictionaries containing data to upsert
+            conflict_fields: Fields that determine uniqueness (e.g., ["id"] or ["user_id", "item_id"])
+            update_fields: Fields to update on conflict (if None, updates all fields except conflict_fields)
+            session: Optional AsyncSession for transaction management
+            
+        Returns:
+            List of upserted records as schema objects
+        """
+        if not data:
+            return []
+        
+        operation_context = f"upsert_data(table={self.table_name}, records={len(data)}, conflict_fields={conflict_fields})"
+        self.logger.debug(f"Starting {operation_context}")
+        
+        # Validate input data
+        validated_data = []
+        cache_keys_to_delete = []
+        
+        for idx, item in enumerate(data):
+            if not isinstance(item, dict):
+                self.logger.warning(f"Item {idx}: Not a dictionary, skipping")
+                continue
+            
+            try:
+                # Validate with create schema (for new records) or update schema (for updates)
+                # Try create schema first for full validation
+                try:
+                    validated_item = self.create_schemas(**item)
+                    validated_dict = validated_item.model_dump()
+                except:
+                    # Fall back to update schema for partial updates
+                    validated_item = self.update_schemas(**item)
+                    validated_dict = validated_item.model_dump(exclude_unset=True)
+                
+                validated_data.append(validated_dict)
+                
+                # Prepare cache keys for deletion if ID is in conflict fields
+                if "id" in conflict_fields and "id" in validated_dict:
+                    cache_keys_to_delete.append(str(validated_dict["id"]))
+                    
+            except Exception as e:
+                self.logger.warning(f"Schema validation failed for item {idx}: {str(e)}")
+                continue
+        
+        if not validated_data:
+            self.logger.warning(f"{operation_context} - No valid data after validation")
+            return []
+        
+        # Clear cache for affected records (best effort)
+        if cache_keys_to_delete:
+            try:
+                await self.delete_caches(self.table_name, set(cache_keys_to_delete))
+                
+                # Also delete null markers
+                for record_id in cache_keys_to_delete:
+                    null_key = f"{self.table_name}:{record_id}:null"
+                    try:
+                        await self.delete_null_key(null_key)
+                    except:
+                        pass
+            except Exception as cache_err:
+                self.logger.warning(f"Pre-upsert cache cleanup failed: {cache_err}")
+        
+        # Perform upsert operation
+        try:
+            upserted_records = await self.upsert_sql(
+                self.table_name,
+                validated_data,
+                conflict_fields,
+                update_fields,
+                session
+            )
+        except Exception as sql_err:
+            self.logger.error(f"SQL upsert failed in {operation_context}: {sql_err}")
+            raise
+        
+        # Convert to main schemas
+        results = []
+        for record in upserted_records:
+            if record:
+                try:
+                    schema_data = self.main_schemas(**record)
+                    results.append(schema_data)
+                except Exception as schema_err:
+                    self.logger.error(f"Schema conversion failed for upserted record: {schema_err}")
+        
+        # Clear cache again to ensure consistency
+        if cache_keys_to_delete:
+            try:
+                await self.delete_caches(self.table_name, set(cache_keys_to_delete))
+            except:
+                pass
+        
+        self.logger.debug(f"Completed {operation_context}, upserted {len(results)} records")
+        return results
+
+    @handle_errors(operation="exists_check")
+    async def exists_check(self, id_value: Any, session=None) -> bool:
+        """Quick check if a single record exists
+        
+        Args:
+            id_value: The ID value to check
+            session: Optional AsyncSession
+            
+        Returns:
+            True if record exists, False otherwise
+        """
+        operation_context = f"exists_check(table={self.table_name}, id={id_value})"
+        self.logger.debug(f"Starting {operation_context}")
+        
+        # Check cache first
+        try:
+            # Check for null marker
+            null_key = f"{self.table_name}:{id_value}:null"
+            is_null_marked = await self.redis.exists(null_key)
+            
+            if is_null_marked:
+                self.logger.debug(f"{operation_context} - Found null marker, returning False")
+                return False
+            
+            # Try to get from cache
+            cached_data = await self.get_caches(self.table_name, {str(id_value)})
+            if cached_data:
+                self.logger.debug(f"{operation_context} - Found in cache, returning True")
+                return True
+        except Exception as cache_err:
+            self.logger.warning(f"Cache check failed in {operation_context}: {cache_err}")
+        
+        # Check database
+        try:
+            result = await self.exists_sql(
+                self.table_name,
+                [id_value],
+                session=session
+            )
+            exists = result.get(id_value, False)
+            
+            # Update cache based on result
+            if not exists:
+                # Set null marker for non-existent record
+                try:
+                    null_key = f"{self.table_name}:{id_value}:null"
+                    await self.set_null_key(null_key, 300)  # 5 minutes
+                except:
+                    pass
+            
+            self.logger.debug(f"Completed {operation_context}, exists={exists}")
+            return exists
+            
+        except Exception as e:
+            self.logger.error(f"Database check failed in {operation_context}: {str(e)}")
+            raise
+
+    @handle_errors(operation="batch_exists")
+    async def batch_exists(self, id_values: set, session=None) -> dict[Any, bool]:
+        """Check existence of multiple records
+        
+        Args:
+            id_values: Set of ID values to check
+            session: Optional AsyncSession
+            
+        Returns:
+            Dictionary mapping each ID to its existence status
+        """
+        if not id_values:
+            return {}
+        
+        operation_context = f"batch_exists(table={self.table_name}, ids={len(id_values)})"
+        self.logger.debug(f"Starting {operation_context}")
+        
+        # Initialize result
+        result = {}
+        unchecked_ids = set()
+        
+        # Check cache first
+        for id_val in id_values:
+            try:
+                # Check for null marker
+                null_key = f"{self.table_name}:{id_val}:null"
+                is_null_marked = await self.redis.exists(null_key)
+                
+                if is_null_marked:
+                    result[id_val] = False
+                    continue
+                
+                # Try to get from cache
+                cached_data = await self.get_caches(self.table_name, {str(id_val)})
+                if cached_data:
+                    result[id_val] = True
+                else:
+                    unchecked_ids.add(id_val)
+                    
+            except Exception as cache_err:
+                self.logger.warning(f"Cache check failed for ID {id_val}: {cache_err}")
+                unchecked_ids.add(id_val)
+        
+        # Check database for remaining IDs
+        if unchecked_ids:
+            try:
+                db_result = await self.exists_sql(
+                    self.table_name,
+                    list(unchecked_ids),
+                    session=session
+                )
+                
+                # Merge results and update cache
+                for id_val in unchecked_ids:
+                    exists = db_result.get(id_val, False)
+                    result[id_val] = exists
+                    
+                    # Set null marker for non-existent records
+                    if not exists:
+                        try:
+                            null_key = f"{self.table_name}:{id_val}:null"
+                            await self.set_null_key(null_key, 300)  # 5 minutes
+                        except:
+                            pass
+                            
+            except Exception as e:
+                self.logger.error(f"Database check failed in {operation_context}: {str(e)}")
+                # For unchecked IDs, default to False
+                for id_val in unchecked_ids:
+                    if id_val not in result:
+                        result[id_val] = False
+        
+        self.logger.debug(f"Completed {operation_context}, checked {len(result)} IDs")
+        return result
+
+    @handle_errors(operation="refresh_cache")
+    async def refresh_cache(self, id_values: set) -> dict:
+        """Reload specific records from database to cache
+        
+        Args:
+            id_values: Set of ID values to refresh in cache
+            
+        Returns:
+            Dictionary with refresh statistics
+        """
+        if not id_values:
+            return {"refreshed": 0, "not_found": 0, "errors": 0}
+        
+        operation_context = f"refresh_cache(table={self.table_name}, ids={len(id_values)})"
+        self.logger.debug(f"Starting {operation_context}")
+        
+        refreshed = 0
+        not_found = 0
+        errors = 0
+        
+        try:
+            # Clear existing cache entries and null markers
+            cache_keys = {str(id_val) for id_val in id_values}
+            await self.delete_caches(self.table_name, cache_keys)
+            
+            # Clear null markers
+            for id_val in id_values:
+                null_key = f"{self.table_name}:{id_val}:null"
+                try:
+                    await self.delete_null_key(null_key)
+                except:
+                    pass
+            
+            # Fetch fresh data from database
+            sql_results = await self.read_sql(
+                table_name=self.table_name,
+                filters={"id": list(id_values)}
+            )
+            
+            if sql_results:
+                # Prepare cache data
+                cache_data_to_set = {}
+                found_ids = set()
+                
+                for sql_row in sql_results:
+                    if sql_row and "id" in sql_row:
+                        cache_data_to_set[str(sql_row["id"])] = sql_row
+                        found_ids.add(sql_row["id"])
+                        refreshed += 1
+                
+                # Store in cache
+                if cache_data_to_set:
+                    await self.store_caches(self.table_name, cache_data_to_set)
+                
+                # Mark missing IDs with null markers
+                missing_ids = id_values - found_ids
+                for missing_id in missing_ids:
+                    null_key = f"{self.table_name}:{missing_id}:null"
+                    await self.set_null_key(null_key, 300)  # 5 minutes
+                    not_found += 1
+            else:
+                # All IDs not found
+                for id_val in id_values:
+                    null_key = f"{self.table_name}:{id_val}:null"
+                    await self.set_null_key(null_key, 300)
+                    not_found += 1
+                    
+        except Exception as e:
+            self.logger.error(f"Error in {operation_context}: {str(e)}")
+            errors = len(id_values) - refreshed - not_found
+        
+        result = {
+            "refreshed": refreshed,
+            "not_found": not_found,
+            "errors": errors
+        }
+        
+        self.logger.debug(f"Completed {operation_context}: {result}")
+        return result
+
+    @handle_errors(operation="get_distinct_values")
+    async def get_distinct_values(
+        self,
+        field: str,
+        filters: dict[str, Any] = None,
+        cache_ttl: int = 300,
+        session=None
+    ) -> list[Any]:
+        """Get distinct values from a field with optional caching
+        
+        Args:
+            field: The field name to get distinct values from
+            filters: Optional filters to apply
+            cache_ttl: Cache TTL in seconds (default: 300, set to 0 to disable caching)
+            session: Optional AsyncSession
+            
+        Returns:
+            List of distinct values from the specified field
+        """
+        operation_context = f"get_distinct_values(table={self.table_name}, field={field})"
+        self.logger.debug(f"Starting {operation_context}")
+        
+        # Generate cache key for this query
+        cache_key = None
+        if cache_ttl > 0:
+            import hashlib
+            filter_str = json.dumps(filters, sort_keys=True) if filters else ""
+            cache_key = f"{self.table_name}:distinct:{field}:{hashlib.md5(filter_str.encode()).hexdigest()}"
+            
+            # Try to get from cache
+            try:
+                cached_result = await self.redis.get(cache_key)
+                if cached_result:
+                    result = json.loads(cached_result)
+                    self.logger.debug(f"{operation_context} - Found in cache, returning {len(result)} values")
+                    return result
+            except Exception as cache_err:
+                self.logger.warning(f"Cache read failed in {operation_context}: {cache_err}")
+        
+        # Get from database
+        try:
+            distinct_values = await SQLOperate.get_distinct_values(
+                self,
+                self.table_name,
+                field,
+                filters,
+                session=session
+            )
+            
+            # Cache the result if caching is enabled
+            if cache_key and cache_ttl > 0:
+                try:
+                    await self.redis.setex(
+                        cache_key,
+                        cache_ttl,
+                        json.dumps(distinct_values, cls=EnhancedJSONEncoder)
+                    )
+                except Exception as cache_err:
+                    self.logger.warning(f"Cache write failed in {operation_context}: {cache_err}")
+            
+            self.logger.debug(f"Completed {operation_context}, found {len(distinct_values)} distinct values")
+            return distinct_values
+            
+        except Exception as e:
+            self.logger.error(f"Database query failed in {operation_context}: {str(e)}")
+            raise

@@ -395,9 +395,28 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         limit: int | None = None, 
         offset: int = 0,
         order_by: str | None = None,
-        order_direction: str = "ASC"
+        order_direction: str = "ASC",
+        date_field: str | None = None,
+        start_date: Any = None,
+        end_date: Any = None,
+        session: Any = None
     ) -> list[T]:
-        """Read data by filter conditions with optional pagination and ordering"""
+        """Read data by filter conditions with optional pagination, ordering and date range filtering
+        
+        Args:
+            filters: Filter conditions
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+            order_by: Column to order by
+            order_direction: Order direction (ASC or DESC)
+            date_field: Optional date field for range filtering
+            start_date: Optional start date for range filtering
+            end_date: Optional end date for range filtering
+            session: Optional external AsyncSession
+            
+        Returns:
+            List of records as model instances
+        """
         try:
             # Use SQL read method with filters
             sql_results = await self.read_sql(
@@ -406,7 +425,11 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 limit=limit,
                 offset=offset,
                 order_by=order_by,
-                order_direction=order_direction
+                order_direction=order_direction,
+                date_field=date_field,
+                start_date=start_date,
+                end_date=end_date,
+                session=session
             )
 
             # Convert to main schemas

@@ -276,15 +276,24 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             )
 
     @handle_errors(operation="read_data_by_filter")
-    async def read_data_by_filter(self, filters: dict[str, Any], limit: int | None = None, offset: int = 0) -> list[T]:
-        """Read data by filter conditions with optional pagination"""
+    async def read_data_by_filter(
+        self, 
+        filters: dict[str, Any], 
+        limit: int | None = None, 
+        offset: int = 0,
+        order_by: str | None = None,
+        order_direction: str = "ASC"
+    ) -> list[T]:
+        """Read data by filter conditions with optional pagination and ordering"""
         try:
             # Use SQL read method with filters
             sql_results = await self.read_sql(
                 table_name=self.table_name,
                 filters=filters,
                 limit=limit,
-                offset=offset
+                offset=offset,
+                order_by=order_by,
+                order_direction=order_direction
             )
 
             # Convert to main schemas

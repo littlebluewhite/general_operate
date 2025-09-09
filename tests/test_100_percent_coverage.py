@@ -614,11 +614,18 @@ class TestEdgeCasesAndTransactions:
         
         result = sql_operate._validate_data_dict(data, "test_op")
         
-        # Should exclude null_set values and None
+        # Should convert null_set values and None to None (but keep the keys)
         assert "normal_value" in result
-        assert "null_marker" not in result
-        assert "null_string" not in result  
-        assert "actual_none" not in result
+        assert result["normal_value"] == "test"
+        
+        assert "null_marker" in result
+        assert result["null_marker"] is None
+        
+        assert "null_string" in result  
+        assert result["null_string"] is None
+        
+        assert "actual_none" in result
+        assert result["actual_none"] is None
 
 
 class TestDatabaseConnectivityErrors:

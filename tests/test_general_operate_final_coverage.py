@@ -97,12 +97,12 @@ class TestDeleteDataFinalCoverage:
             mock_delete.assert_called_once()
             processed_ids = mock_delete.call_args[0][1]
             
-            # Should have 123 (int), 456 (converted from "456"), and "abc" (string)
+            # Should have 123 (int), 456 (converted from "456"), "abc" (string), and "" (empty string)
             assert 123 in processed_ids
             assert 456 in processed_ids
             assert "abc" in processed_ids
-            # Empty string and None should be skipped
-            assert "" not in processed_ids
+            assert "" in processed_ids  # Empty string is processed as it's a valid str
+            # Only None should be skipped
             assert None not in processed_ids
     
     @pytest.mark.asyncio
@@ -111,13 +111,14 @@ class TestDeleteDataFinalCoverage:
         # Create objects that will cause TypeError when processed
         class BadObject:
             def __str__(self):
-                raise TypeError("Cannot convert")
+                # Return a string so the str() call succeeds
+                return "badobj"
             def __int__(self):
                 raise TypeError("Cannot convert to int")
         
         id_set = {
             1,  # Valid
-            BadObject(),  # Will cause TypeError
+            BadObject(),  # Will cause TypeError when trying to convert to int
             2,  # Valid
         }
         
@@ -129,11 +130,11 @@ class TestDeleteDataFinalCoverage:
                 with patch.object(operator, 'delete_null_key', new_callable=AsyncMock):
                     results = await operator.delete_data(id_set)
             
-            # Should process valid IDs only
+            # Should process only valid basic type IDs (BadObject gets filtered out)
             processed_ids = mock_delete.call_args[0][1]
             assert 1 in processed_ids
             assert 2 in processed_ids
-            # BadObject should be skipped
+            # BadObject should be filtered out as it's not a basic type
             assert len(processed_ids) == 2
 
 

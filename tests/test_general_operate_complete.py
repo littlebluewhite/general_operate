@@ -176,13 +176,15 @@ class TestTransactionManager:
     async def test_transaction_success(self, operator):
         """Test successful transaction"""
         mock_session = AsyncMock()
-        mock_session.begin = AsyncMock()
         mock_session.close = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock()
-        mock_session.begin.return_value = mock_session
         
-        with patch.object(operator, 'create_external_session', AsyncMock(return_value=mock_session)):
+        # Mock the begin() context manager
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=None)
+        mock_begin.__aexit__ = AsyncMock(return_value=None)
+        mock_session.begin = MagicMock(return_value=mock_begin)
+        
+        with patch.object(operator, 'create_external_session', return_value=mock_session):
             async with operator.transaction() as session:
                 assert session == mock_session
             
@@ -192,13 +194,15 @@ class TestTransactionManager:
     async def test_transaction_with_error(self, operator):
         """Test transaction with error handling"""
         mock_session = AsyncMock()
-        mock_session.begin = AsyncMock()
         mock_session.close = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock()
-        mock_session.begin.return_value = mock_session
         
-        with patch.object(operator, 'create_external_session', AsyncMock(return_value=mock_session)):
+        # Mock the begin() context manager
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=None)
+        mock_begin.__aexit__ = AsyncMock(return_value=None)
+        mock_session.begin = MagicMock(return_value=mock_begin)
+        
+        with patch.object(operator, 'create_external_session', return_value=mock_session):
             try:
                 async with operator.transaction() as session:
                     raise ValueError("Test error")
@@ -700,7 +704,11 @@ class TestReadDataByFilter:
                 limit=10,
                 offset=20,
                 order_by="created_at",
-                order_direction="DESC"
+                order_direction="DESC",
+                date_field=None,
+                start_date=None,
+                end_date=None,
+                session=None
             )
     
     @pytest.mark.asyncio
@@ -1482,9 +1490,12 @@ class TestBatchExists:
         """Test batch exists with mixed cache and database"""
         operator.redis = AsyncMock()
         
+        # Mock the pipeline context manager
         mock_pipeline = AsyncMock()
         mock_pipeline.exists = MagicMock()
         mock_pipeline.execute = AsyncMock(return_value=[False, True, False])  # ID 2 has null marker
+        mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
+        mock_pipeline.__aexit__ = AsyncMock(return_value=None)
         operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
         
         with patch.object(operator, 'get_caches', return_value={"1": {"id": 1}}):
@@ -1503,6 +1514,7 @@ class TestBatchExists:
         async def mock_exists_sql(table_name, ids, session=None):
             return {1: True, 2: False, 3: True}
         
+        # With no Redis, should go straight to database check
         with patch.object(operator, 'exists_sql', side_effect=mock_exists_sql):
             result = await operator.batch_exists({1, 2, 3})
             
@@ -1637,15 +1649,12 @@ class TestGetDistinctValues:
         
         filters = {"status": "active"}
         
-        async def mock_get_distinct(self, table_name, field, filters, session=None):
-            return ["filtered"]
-        
-        with patch.object(SQLOperate, 'get_distinct_values', mock_get_distinct) as mock_distinct:
+        with patch.object(SQLOperate, 'get_distinct_values', return_value=["filtered"]) as mock_distinct:
             result = await operator.get_distinct_values("category", filters=filters, cache_ttl=300)
             
             assert result == ["filtered"]
             mock_distinct.assert_called_once()
-            assert mock_distinct.call_args[0][2] == filters
+            assert mock_distinct.call_args[0][3] == filters
 
 
 class TestEdgeCasesAndErrorHandling:

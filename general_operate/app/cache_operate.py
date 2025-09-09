@@ -275,11 +275,15 @@ class CacheOperate:
 
     async def set_null_key(self, key: str, expiry_seconds: int = 300) -> bool:
         """Set a null marker key with expiry"""
+        if not self.redis:
+            return False
         result = await self.redis.setex(key, expiry_seconds, "1")
         return result is True
 
     async def delete_null_key(self, key: str) -> bool:
         """Delete a null marker key"""
+        if not self.redis:
+            return False
         result = await self.redis.delete(key)
         return result > 0
 

@@ -411,6 +411,9 @@ class TestBuildInsertQuery:
     @pytest.mark.asyncio
     async def test_execute_raw_query_with_external_session(self, sql_operate, mock_session):
         """Test raw query with external session"""
+        # Mock create_external_session to verify it's not called
+        sql_operate.create_external_session = Mock()
+        
         mock_result = Mock()
         mock_result._is_cursor = False
         mock_result.rowcount = 0
@@ -595,7 +598,7 @@ class TestUpdateSQL:
         mapping_dict = {"id": 1, "name": "test"}
         mock_row._mapping = mapping_dict
         mock_select_result = Mock()
-        mock_select_result.fetchall = Mock(return_value=[mock_row])
+        mock_select_result.fetchone = Mock(return_value=mock_row)  # Use fetchone, not fetchall
         
         # Set up sequential returns for UPDATE then SELECT
         mock_session.execute.side_effect = [mock_insert_result, mock_select_result]

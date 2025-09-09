@@ -446,16 +446,21 @@ class TestUpsertDataExceptions:
     
     @pytest.mark.asyncio
     async def test_upsert_data_no_valid_data_after_validation(self, operator):
-        """Test no valid data after validation (lines 1006-1007)"""
+        """Test no valid data after validation (lines 1041-1043)"""
         data = [{"invalid": "data1"}, {"invalid": "data2"}]
         conflict_fields = ["id"]
         
-        # Mock create_schemas to return empty list (no valid data)
-        operator.create_schemas = lambda **kwargs: []
+        # Mock both create_schemas and update_schemas to raise exceptions (invalid data)
+        def mock_schema_error(**kwargs):
+            raise ValueError("Schema validation failed")
         
+        operator.create_schemas = mock_schema_error
+        operator.update_schemas = mock_schema_error
+        
+        # Since there's no valid data, should return empty list before SQL execution
         result = await operator.upsert_data(data, conflict_fields)
         
-        # Should return empty list (lines 1006-1007)
+        # Should return empty list (lines 1041-1043)
         assert result == []
     
     @pytest.mark.asyncio
@@ -571,25 +576,35 @@ class TestBatchExistsExceptions:
         """Test RedisError during null marker operations (line 1219)"""
         id_values = {1, 2, 3}
         
-        # Mock exists_sql to return a mix of existing and non-existing
-        mock_exists_sql = AsyncMock(return_value={1: True, 2: False, 3: False})
+        # Mock pipeline for null marker checks
+        mock_pipe = AsyncMock()
+        mock_pipe.exists = MagicMock()
+        mock_pipe.execute = AsyncMock(return_value=[False, False, False])  # No null markers
+        mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+        mock_pipe.__aexit__ = AsyncMock(return_value=None)
+        operator.redis.pipeline = MagicMock(return_value=mock_pipe)
         
-        # Mock set_null_key to raise RedisError for non-existent items
-        mock_set_null = AsyncMock(side_effect=redis.RedisError("Redis error"))
-        
-        with patch.object(operator, 'exists_sql', mock_exists_sql):
-            with patch.object(operator, 'set_null_key', mock_set_null):
-                with patch.object(operator.logger, 'debug') as mock_debug:
-                    result = await operator.batch_exists(id_values)
-                
-                # Should log debug message for null marker failure (line 1219) 
-                # Check that set_null_key was called for non-existent items (2 and 3)
-                assert mock_set_null.call_count == 2
-                
-                # Debug log should be called for both failed null marker operations
-                debug_calls = [str(call) for call in mock_debug.call_args_list]
-                # At least one debug call should mention the failure
-                assert mock_debug.call_count >= 2  # At least for the two failed null markers
+        # Mock get_caches to return empty (no cache hits)
+        with patch.object(operator, 'get_caches', return_value={}):
+            # Mock exists_sql to return a mix of existing and non-existing
+            mock_exists_sql = AsyncMock(return_value={1: True, 2: False, 3: False})
+            
+            # Mock set_null_key to raise RedisError for non-existent items
+            mock_set_null = AsyncMock(side_effect=redis.RedisError("Redis error"))
+            
+            with patch.object(operator, 'exists_sql', mock_exists_sql):
+                with patch.object(operator, 'set_null_key', mock_set_null):
+                    with patch.object(operator.logger, 'debug') as mock_debug:
+                        result = await operator.batch_exists(id_values)
+                    
+                    # Should log debug message for null marker failure (line 1219) 
+                    # Check that set_null_key was called for non-existent items (2 and 3)
+                    assert mock_set_null.call_count == 2
+                    
+                    # Debug log should be called for both failed null marker operations
+                    debug_calls = [str(call) for call in mock_debug.call_args_list]
+                    # At least one debug call should mention the failure
+                    assert mock_debug.call_count >= 2  # At least for the two failed null markers
 
 
 class TestRefreshCacheExceptions:
@@ -604,10 +619,15 @@ class TestRefreshCacheExceptions:
         mock_pipe = AsyncMock()
         mock_pipe.delete = MagicMock()
         mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
+        mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+        mock_pipe.__aexit__ = AsyncMock(return_value=None)
         operator.redis.pipeline = MagicMock(return_value=mock_pipe)
         
+        async def mock_read_sql(*args, **kwargs):
+            return []
+        
         with patch.object(operator, 'delete_caches', new_callable=AsyncMock):
-            with patch.object(operator, 'read_sql', return_value=[]):
+            with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
                 with patch.object(operator.logger, 'debug') as mock_debug:
                     result = await operator.refresh_cache(id_values)
                 
@@ -618,44 +638,90 @@ class TestRefreshCacheExceptions:
     
     @pytest.mark.asyncio
     async def test_refresh_cache_missing_ids_pipeline_failure(self, operator):
-        """Test missing IDs pipeline failure (lines 1277-1281)"""
+        """Test missing IDs pipeline failure (lines 1292-1301)"""
         id_values = {1, 2, 3}
         
         # Mock read_sql to return partial results
-        with patch.object(operator, 'read_sql', return_value=[{"id": 1, "name": "test"}]):
+        async def mock_read_sql(*args, **kwargs):
+            return [{"id": 1, "name": "test"}]
+        
+        with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
             with patch.object(operator, 'store_caches', new_callable=AsyncMock):
-                # Mock pipeline failure for missing IDs
-                mock_pipe = AsyncMock()
-                mock_pipe.setex = MagicMock()
-                mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
-                operator.redis.pipeline = MagicMock(return_value=mock_pipe)
-                
-                with patch.object(operator.logger, 'debug') as mock_debug:
-                    result = await operator.refresh_cache(id_values)
-                
-                # Should handle pipeline failure gracefully (lines 1277-1281)
-                assert result["refreshed"] == 1
-                assert result["not_found"] == 2  # IDs 2,3 not found
+                with patch.object(operator, 'delete_caches', new_callable=AsyncMock):
+                    # Mock pipeline failure for missing IDs - pipeline should be async context manager
+                    # First pipeline call (delete null markers) should succeed
+                    # Second pipeline call (set null markers) should fail
+                    call_count = 0
+                    def pipeline_side_effect(transaction=False):
+                        nonlocal call_count
+                        call_count += 1
+                        
+                        mock_pipe = AsyncMock()
+                        mock_pipe.setex = MagicMock()
+                        mock_pipe.delete = MagicMock()
+                        
+                        if call_count == 1:
+                            # First call succeeds (delete null markers)
+                            mock_pipe.execute = AsyncMock(return_value=[])
+                        else:
+                            # Second call fails (set null markers for missing IDs)
+                            mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
+                        
+                        mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+                        mock_pipe.__aexit__ = AsyncMock(return_value=None)
+                        return mock_pipe
+                    
+                    operator.redis.pipeline = MagicMock(side_effect=pipeline_side_effect)
+                    
+                    with patch.object(operator.logger, 'debug') as mock_debug:
+                        result = await operator.refresh_cache(id_values)
+                    
+                    # Should handle pipeline failure gracefully (lines 1292-1301)
+                    assert result["refreshed"] == 1
+                    assert result["not_found"] == 2  # IDs 2,3 not found
     
     @pytest.mark.asyncio
     async def test_refresh_cache_all_missing_pipeline_failure(self, operator):
-        """Test all missing IDs pipeline failure (lines 1292-1296)"""
+        """Test all missing IDs pipeline failure (lines 1307-1316)"""
         id_values = {1, 2, 3}
         
-        with patch.object(operator, 'read_sql', return_value=[]):  # No results found
+        async def mock_read_sql(*args, **kwargs):
+            return []  # No results found
+        
+        with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
             with patch.object(operator, 'store_caches', new_callable=AsyncMock):
-                # Mock pipeline failure for all missing IDs
-                mock_pipe = AsyncMock()
-                mock_pipe.setex = MagicMock()
-                mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
-                operator.redis.pipeline = MagicMock(return_value=mock_pipe)
-                
-                with patch.object(operator.logger, 'debug') as mock_debug:
-                    result = await operator.refresh_cache(id_values)
-                
-                # Should handle pipeline failure gracefully (lines 1292-1296)
-                assert result["refreshed"] == 0
-                assert result["not_found"] == 3
+                with patch.object(operator, 'delete_caches', new_callable=AsyncMock):
+                    # Mock pipeline failure for all missing IDs
+                    # First pipeline call (delete null markers) should succeed
+                    # Second pipeline call (set null markers for all missing IDs) should fail
+                    call_count = 0
+                    def pipeline_side_effect(transaction=False):
+                        nonlocal call_count
+                        call_count += 1
+                        
+                        mock_pipe = AsyncMock()
+                        mock_pipe.setex = MagicMock()
+                        mock_pipe.delete = MagicMock()
+                        
+                        if call_count == 1:
+                            # First call succeeds (delete null markers)
+                            mock_pipe.execute = AsyncMock(return_value=[])
+                        else:
+                            # Second call fails (set null markers for all missing IDs)
+                            mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
+                        
+                        mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+                        mock_pipe.__aexit__ = AsyncMock(return_value=None)
+                        return mock_pipe
+                    
+                    operator.redis.pipeline = MagicMock(side_effect=pipeline_side_effect)
+                    
+                    with patch.object(operator.logger, 'debug') as mock_debug:
+                        result = await operator.refresh_cache(id_values)
+                    
+                    # Should handle pipeline failure gracefully (lines 1307-1316)
+                    assert result["refreshed"] == 0
+                    assert result["not_found"] == 3
 
 
 class TestGetDistinctValuesExceptions:
@@ -663,21 +729,24 @@ class TestGetDistinctValuesExceptions:
     
     @pytest.mark.asyncio
     async def test_get_distinct_values_cache_read_failure(self, operator):
-        """Test cache read failure (lines 1347-1348)"""
+        """Test cache read failure (lines 1382-1383)"""
         field = "status"
         filters = {"active": True}
         cache_ttl = 300
         
-        # Mock Redis get to fail
+        # Mock Redis get to fail but setex to succeed
         operator.redis.get = AsyncMock(side_effect=redis.RedisError("Cache read failed"))
+        operator.redis.setex = AsyncMock(return_value=True)  # Allow cache write to succeed
         
         with patch('general_operate.app.sql_operate.SQLOperate.get_distinct_values', return_value=["active", "inactive"]):
             with patch.object(operator.logger, 'warning') as mock_warning:
                 result = await operator.get_distinct_values(field, filters, cache_ttl)
             
-            # Should log cache read failure (lines 1347-1348)
+            # Should log cache read failure (lines 1382-1383)
             mock_warning.assert_called()
-            assert "Cache read failed" in str(mock_warning.call_args[0][0])
+            # Check if any of the warning calls contains the cache read failure message
+            warning_messages = [str(call.args[0]) for call in mock_warning.call_args_list]
+            assert any("Cache read failed" in msg for msg in warning_messages), f"Expected 'Cache read failed' in warnings: {warning_messages}"
     
     @pytest.mark.asyncio
     async def test_get_distinct_values_cache_write_failure(self, operator):
@@ -734,7 +803,7 @@ class TestSQLOperateExceptionHandling:
         # Create mock PostgreSQL error
         pg_error = MagicMock(spec=AsyncAdapt_asyncpg_dbapi.Error)
         pg_error.sqlstate = "23505"
-        pg_error.__str__ = lambda: "duplicate key: some detailed message"
+        pg_error.__str__ = lambda self: "duplicate key: some detailed message"
         
         db_error = DBAPIError("statement", {}, pg_error)
         
@@ -1072,11 +1141,11 @@ class TestEdgeCasesAndMissingLines:
         assert result == {1: True, 2: False, 3: True}
     
     def test_sql_operate_sync_wrapper_coverage(self, sql_operate):
-        """Test sync wrapper in exception_handler decorator (lines 114-126)"""
+        """Test sync wrapper in exception_handler decorator (lines 118-123)"""
         
         @sql_operate.exception_handler
         def sync_test_func(self):
-            raise ValueError("Sync function error")
+            raise ValueError("SQL operation validation error")
         
         with pytest.raises(DatabaseException) as exc_info:
             sync_test_func(sql_operate)

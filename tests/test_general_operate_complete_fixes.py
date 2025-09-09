@@ -475,9 +475,12 @@ class TestBatchExistsMissingCoverage:
         """Test batch_exists with ConnectionError when setting null keys"""
         operator.redis = AsyncMock()
         
+        # Create a proper async context manager mock
         mock_pipeline = AsyncMock()
         mock_pipeline.exists = MagicMock()
         mock_pipeline.execute = AsyncMock(return_value=[False, False])
+        mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
+        mock_pipeline.__aexit__ = AsyncMock(return_value=None)
         operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
         
         with patch.object(operator, 'get_caches', return_value={}):

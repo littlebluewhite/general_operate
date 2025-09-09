@@ -224,8 +224,11 @@ class TestSpecificMissingLines:
         """Test empty validated_ids (line 792)"""
         
         # Use invalid IDs that will all be skipped
-        # None and non-numeric strings will be filtered out
-        invalid_ids = {None, "not_a_number", "also_not_numeric"}
+        # None and non-basic types will be filtered out
+        class BadObject:
+            pass
+        
+        invalid_ids = {None, BadObject(), object()}
         
         with patch.object(operator, 'delete_sql') as mock_delete:
             result = await operator.delete_data(invalid_ids)

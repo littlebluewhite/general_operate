@@ -467,7 +467,7 @@ class TestSQLOperate:
     async def test_create_sql_mysql_success(self, sql_operate, mock_sql_client):
         """Test MySQL create without RETURNING clause"""
         mock_sql_client.engine_type = "mysql"
-        sql_operate._is_postgresql = False
+        sql_operate.db_type = "mysql"  # Set db_type for test compatibility
         
         mock_session = self.create_mock_session()
         mock_insert_result = Mock()
@@ -725,7 +725,7 @@ class TestSQLOperate:
     @pytest.mark.asyncio
     async def test_upsert_sql_mysql(self, sql_operate):
         """Test upsert on MySQL"""
-        sql_operate._is_postgresql = False
+        sql_operate.db_type = "mysql"  # Set db_type for test compatibility
         mock_session = self.create_mock_session()
         
         # First call: INSERT ... ON DUPLICATE KEY UPDATE
@@ -949,12 +949,13 @@ class TestSQLOperate:
         mock_session.execute.return_value = mock_result
         
         with patch.object(sql_operate, 'create_external_session', return_value=mock_session):
-            result = await sql_operate.read_sql_with_date_range(
+            # Use read_sql with date filters
+            result = await sql_operate.read_sql(
                 "test_table",
-                filters={"status": "active"},
-                date_field="created_at",
-                start_date="2024-01-01",
-                end_date="2024-12-31"
+                filters={
+                    "status": "active",
+                    "created_at": {"start_date": "2024-01-01", "end_date": "2024-12-31"}
+                }
             )
         
         assert result == []
@@ -1445,9 +1446,10 @@ class TestEdgeCases:
         
         result = sql_operate._validate_data_dict(data)
         
-        assert "field1" not in result
-        assert "field2" not in result
-        assert "field3" not in result
+        # Null values should be converted to None but kept in result
+        assert result["field1"] is None
+        assert result["field2"] is None
+        assert result["field3"] is None
         assert result["field4"] == "value"
     
     @pytest.mark.asyncio

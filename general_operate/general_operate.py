@@ -803,8 +803,21 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         validated_ids = []
         for id_key in id_value:
             try:
-                # Convert id to appropriate type
-                record_id = int(id_key) if str(id_key).isdigit() else id_key
+                # Skip None values explicitly
+                if id_key is None:
+                    self.logger.debug(f"Skipping None ID in delete_data")
+                    continue
+                    
+                # Convert id to appropriate type - more strict validation
+                if str(id_key).isdigit():
+                    record_id = int(id_key)
+                elif isinstance(id_key, (str, int, float)):
+                    record_id = id_key
+                else:
+                    # Skip objects that aren't basic types
+                    self.logger.debug(f"Skipping non-basic type ID in delete_data: {id_key} - {type(id_key).__name__}")
+                    continue
+                    
                 validated_ids.append(record_id)
             except (ValueError, TypeError) as e:
                 # Skip invalid IDs - log for debugging

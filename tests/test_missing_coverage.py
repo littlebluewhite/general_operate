@@ -77,11 +77,13 @@ class TestRefreshCacheMissingCoverage:
             ]
         
         with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
-            refreshed, not_found = await operator.refresh_cache({1, 2, 3})
-            
-            # Should have refreshed 2 and not found 1
-            assert refreshed == 2
-            assert not_found == 1  # ID 3 was not found
+            with patch.object(operator, 'delete_caches', return_value=None):
+                with patch.object(operator, 'store_caches', return_value=None):
+                    result = await operator.refresh_cache({1, 2, 3})
+                    
+                    # Should have refreshed 2 and not found 1
+                    assert result["refreshed"] == 2
+                    assert result["not_found"] == 1  # ID 3 was not found
     
     @pytest.mark.asyncio
     async def test_refresh_cache_with_redis_pipeline_failure_on_missing(self, operator):
@@ -93,16 +95,20 @@ class TestRefreshCacheMissingCoverage:
         # Mock Redis pipeline to fail
         mock_pipe = AsyncMock()
         mock_pipe.setex = MagicMock()
+        mock_pipe.delete = MagicMock()
         mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
+        mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+        mock_pipe.__aexit__ = AsyncMock(return_value=None)
         operator.redis.pipeline = MagicMock(return_value=mock_pipe)
         
         with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
             with patch.object(operator, 'store_caches', new_callable=AsyncMock):
-                refreshed, not_found = await operator.refresh_cache({1, 2, 3})
-                
-                # Should still report correct counts even if pipeline failed
-                assert refreshed == 1
-                assert not_found == 2  # IDs 2 and 3 not found
+                with patch.object(operator, 'delete_caches', return_value=None):
+                    result = await operator.refresh_cache({1, 2, 3})
+                    
+                    # Should still report correct counts even if pipeline failed
+                    assert result["refreshed"] == 1
+                    assert result["not_found"] == 2  # IDs 2 and 3 not found
 
 
 class TestDeleteDataEdgeCases:
@@ -117,7 +123,7 @@ class TestDeleteDataEdgeCases:
             return ids
         
         with patch.object(operator, 'delete_sql', side_effect=mock_delete_sql) as mock_delete:
-            with patch.object(operator, 'delete_caches', new_callable=AsyncMock):
+            with patch('general_operate.general_operate.CacheOperate.delete_caches', new_callable=AsyncMock):
                 with patch.object(operator, 'delete_null_key', new_callable=AsyncMock):
                     results = await operator.delete_data(id_set)
         
@@ -155,8 +161,6 @@ class TestDeleteDataEdgeCases:
         class BadNumericString:
             def __str__(self):
                 return "123"
-            def isdigit(self):
-                return True
             def __int__(self):
                 raise ValueError("Conversion failed")
         
@@ -167,14 +171,11 @@ class TestDeleteDataEdgeCases:
             return ids
         
         with patch.object(operator, 'delete_sql', side_effect=mock_delete_sql) as mock_delete:
-            with patch.object(operator, 'delete_caches', new_callable=AsyncMock):
+            with patch('general_operate.general_operate.CacheOperate.delete_caches', new_callable=AsyncMock):
                 with patch.object(operator, 'delete_null_key', new_callable=AsyncMock):
-                    # Patch str() to return the string for BadNumericString
-                    with patch('builtins.str', side_effect=lambda x: x.__str__() if hasattr(x, '__str__') else str(x)):
-                        results = await operator.delete_data(id_set)
+                    results = await operator.delete_data(id_set)
         
-        # BadNumericString should be included as string since str(bad_obj).isdigit() is True
-        # but the int() conversion will fail, triggering the exception handler
+        # BadNumericString should be skipped due to ValueError when converting to int
         processed_ids = mock_delete.call_args[0][1]
         assert 1 in processed_ids
         assert 2 in processed_ids

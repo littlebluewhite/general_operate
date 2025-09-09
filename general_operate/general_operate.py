@@ -912,12 +912,18 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
     async def count_data(
         self,
         filters: dict[str, Any] | None = None,
+        date_field: str | None = None,
+        start_date: Any = None,
+        end_date: Any = None,
         session=None
     ) -> int:
-        """Count records in the table with optional filters
+        """Count records in the table with optional filters and date range
         
         Args:
             filters: Optional dictionary of filter conditions
+            date_field: Optional date field for range filtering
+            start_date: Optional start date for range filtering (inclusive)
+            end_date: Optional end date for range filtering (inclusive)
             session: Optional AsyncSession for transaction management
             
         Returns:
@@ -931,6 +937,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             count = await self.count_sql(
                 table_name=self.table_name,
                 filters=filters,
+                date_field=date_field,
+                start_date=start_date,
+                end_date=end_date,
                 session=session
             )
             

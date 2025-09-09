@@ -693,18 +693,59 @@ class SQLOperate:
         self,
         table_name: str,
         filters: dict[str, Any] | None = None,
+        date_field: str | None = None,
+        start_date: Any = None,
+        end_date: Any = None,
         session: AsyncSession = None,
     ) -> int:
-        """Get the total count of records in a table with optional filters"""
+        """Get the total count of records in a table with optional filters and date range
+        
+        Args:
+            table_name: Name of the table to count records from
+            filters: Optional filters to apply
+            date_field: Optional date field for range filtering
+            start_date: Optional start date for range filtering (inclusive)
+            end_date: Optional end date for range filtering (inclusive)
+            session: Optional external AsyncSession
+            
+        Returns:
+            int: The count of records matching the criteria
+        """
         self._validate_identifier(table_name, "table name")
+        
+        # Validate date_field if provided
+        if date_field:
+            self._validate_identifier(date_field, "date field")
 
         # Helper function to execute the actual SQL operations
         async def _execute_count(active_session: AsyncSession) -> int:
             query = f"SELECT COUNT(*) as total FROM {table_name}"
 
-            # Add WHERE clause
-            where_clause, params = self._build_where_clause(filters)
-            query += where_clause
+            # Build WHERE clause with both filters and date range
+            where_conditions = []
+            params = {}
+
+            # Add standard filters
+            if filters:
+                where_clause, filter_params = self._build_where_clause(filters)
+                if where_clause:
+                    # Extract the conditions without the WHERE keyword
+                    where_conditions.append(where_clause.replace(" WHERE ", ""))
+                    params.update(filter_params)
+
+            # Add date range filters if date_field is specified
+            if date_field:
+                if start_date is not None:
+                    where_conditions.append(f"{date_field} >= :start_date")
+                    params["start_date"] = start_date
+
+                if end_date is not None:
+                    where_conditions.append(f"{date_field} <= :end_date")
+                    params["end_date"] = end_date
+
+            # Add WHERE clause if there are conditions
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
 
             result = await active_session.execute(text(query), params)
             row = result.fetchone()

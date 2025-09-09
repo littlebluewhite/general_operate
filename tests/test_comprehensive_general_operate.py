@@ -1394,6 +1394,9 @@ class TestGeneralOperateCountData:
             mock_count.assert_called_with(
                 table_name="test_table",
                 filters={"status": "active"},
+                date_field=None,
+                start_date=None,
+                end_date=None,
                 session=session
             )
     

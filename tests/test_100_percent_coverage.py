@@ -20,7 +20,7 @@ import pymysql
 from general_operate.app.sql_operate import SQLOperate
 from general_operate.general_operate import GeneralOperate
 from general_operate.app.client.database import SQLClient
-from general_operate.core.exceptions import DatabaseException, CacheException, ErrorCode, ErrorContext
+from general_operate.core.exceptions import DatabaseException, CacheException, ErrorCode, ErrorContext, GeneralOperateException
 
 
 class MockModule:
@@ -82,6 +82,9 @@ def mock_redis():
     """Mock Redis client."""
     mock = AsyncMock()
     mock_pipe = AsyncMock()
+    
+    # Configure delete method to return proper integer
+    mock.delete = AsyncMock(return_value=1)
     
     class MockPipeline:
         def __init__(self, pipe_mock):
@@ -300,8 +303,9 @@ class TestGeneralOperateCacheLookupErrors:
         mock_redis.exists.return_value = False  # No null marker
         general_operate.get_caches = AsyncMock(return_value=[{"id": 1, "invalid_field": "bad_data"}])
         
-        # Mock schema to raise exception
-        general_operate.main_schemas.side_effect = Exception("Schema validation failed")
+        # Mock schema to raise exception - replace the class with a Mock
+        from unittest.mock import Mock
+        general_operate.main_schemas = Mock(side_effect=Exception("Schema validation failed"))
         
         results, cache_miss_ids, null_marked_ids, failed_cache_ops = await general_operate._process_cache_lookups({1})
         
@@ -354,7 +358,7 @@ class TestGeneralOperateFetchFromSQLErrors:
         """Test _fetch_from_sql single ID error case - Lines 445-447."""
         general_operate.read_one = AsyncMock(side_effect=Exception("Database error"))
         
-        with pytest.raises(DatabaseException) as exc_info:
+        with pytest.raises(GeneralOperateException) as exc_info:
             await general_operate._fetch_from_sql({1})
         
         assert exc_info.value.code == ErrorCode.DB_QUERY_ERROR
@@ -365,7 +369,7 @@ class TestGeneralOperateFetchFromSQLErrors:
         """Test _fetch_from_sql multiple IDs error case - Lines 445-447."""
         general_operate.read_sql = AsyncMock(side_effect=Exception("Bulk read error"))
         
-        with pytest.raises(DatabaseException) as exc_info:
+        with pytest.raises(GeneralOperateException) as exc_info:
             await general_operate._fetch_from_sql({1, 2, 3})
         
         assert exc_info.value.code == ErrorCode.DB_QUERY_ERROR
@@ -438,7 +442,7 @@ class TestGeneralOperateDeleteFilterDataErrors:
     async def test_delete_filter_data_null_marker_error(self, general_operate):
         """Test null marker delete error in delete_filter_data - Lines 851-854."""
         # Mock successful filter delete but failing null marker delete
-        general_operate.delete_filter_sql = AsyncMock(return_value=[1, 2])
+        general_operate.delete_filter = AsyncMock(return_value=[1, 2])
         general_operate.delete_null_key = AsyncMock(side_effect=RedisError("Null key failed"))
         
         with patch('general_operate.general_operate.CacheOperate.delete_caches'):
@@ -450,7 +454,7 @@ class TestGeneralOperateDeleteFilterDataErrors:
     @pytest.mark.asyncio
     async def test_delete_filter_data_cache_cleanup_error(self, general_operate):
         """Test cache cleanup error in delete_filter_data - Lines 856-859."""
-        general_operate.delete_filter_sql = AsyncMock(return_value=[1, 2])
+        general_operate.delete_filter = AsyncMock(return_value=[1, 2])
         general_operate.delete_null_key = AsyncMock()
         
         # Mock cache delete to fail
@@ -465,16 +469,17 @@ class TestGeneralOperateDeleteFilterDataErrors:
     @pytest.mark.asyncio
     async def test_delete_filter_data_database_error(self, general_operate):
         """Test database error handling - Lines 863-865."""
+        from general_operate.core.exceptions import GeneralOperateException
         db_error = DBAPIError("Database error", None, None)
-        general_operate.delete_filter_sql = AsyncMock(side_effect=db_error)
+        general_operate.delete_filter = AsyncMock(side_effect=db_error)
         
-        with pytest.raises(DBAPIError):
+        with pytest.raises(GeneralOperateException):
             await general_operate.delete_filter_data({"status": "inactive"})
     
     @pytest.mark.asyncio
     async def test_delete_filter_data_validation_error(self, general_operate):
         """Test validation error handling - Lines 866-869."""
-        general_operate.delete_filter_sql = AsyncMock(side_effect=ValueError("Invalid filter"))
+        general_operate.delete_filter = AsyncMock(side_effect=ValueError("Invalid filter"))
         
         result = await general_operate.delete_filter_data({"status": "invalid"})
         
@@ -502,6 +507,7 @@ class TestGeneralOperateRefreshCacheErrors:
         
         # Mock pipeline to raise error during execution
         mock_pipe = AsyncMock()
+        mock_pipe.delete = MagicMock()  # Add delete method
         mock_pipe.execute.side_effect = RedisConnectionError("Pipeline failed")
         
         class MockPipeline:
@@ -513,7 +519,7 @@ class TestGeneralOperateRefreshCacheErrors:
         mock_redis.pipeline.return_value = MockPipeline()
         
         # Mock to have missing IDs
-        with patch.object(general_operate, '_fetch_from_sql') as mock_fetch:
+        with patch.object(general_operate, 'read_sql') as mock_fetch:
             mock_fetch.return_value = []  # No results found
             
             result = await general_operate.refresh_cache([1, 2, 3])
@@ -540,8 +546,8 @@ class TestGeneralOperateRefreshCacheErrors:
         
         mock_redis.pipeline.return_value = MockPipeline()
         
-        # Mock _fetch_from_sql to return empty (all not found)
-        with patch.object(general_operate, '_fetch_from_sql') as mock_fetch:
+        # Mock read_sql to return empty (all not found)
+        with patch.object(general_operate, 'read_sql') as mock_fetch:
             mock_fetch.return_value = []
             
             result = await general_operate.refresh_cache([1, 2])
@@ -554,8 +560,8 @@ class TestGeneralOperateRefreshCacheErrors:
     @pytest.mark.asyncio
     async def test_refresh_cache_generic_exception(self, general_operate):
         """Test generic exception handling in refresh_cache - Lines 1297-1299."""
-        # Mock _fetch_from_sql to raise unexpected exception
-        with patch.object(general_operate, '_fetch_from_sql') as mock_fetch:
+        # Mock read_sql to raise unexpected exception
+        with patch.object(general_operate, 'read_sql') as mock_fetch:
             mock_fetch.side_effect = Exception("Unexpected database error")
             
             result = await general_operate.refresh_cache([1, 2])

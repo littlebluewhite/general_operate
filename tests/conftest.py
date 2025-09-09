@@ -13,6 +13,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+import pytest_asyncio
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.errors import KafkaError, KafkaTimeoutError
 
@@ -389,7 +390,7 @@ def consumer_group_config() -> ConsumerGroupConfig:
 
 
 # Async Context Managers for Testing
-@pytest.fixture
+@pytest_asyncio.fixture
 async def kafka_event_bus(kafka_config: Dict[str, Any]) -> AsyncGenerator[KafkaEventBus, None]:
     """Kafka event bus instance with proper lifecycle management."""
     event_bus = KafkaEventBus(kafka_config, "test-service")
@@ -406,7 +407,7 @@ async def kafka_event_bus(kafka_config: Dict[str, Any]) -> AsyncGenerator[KafkaE
         await event_bus.stop()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def dlq_handler(kafka_event_bus: KafkaEventBus) -> AsyncGenerator[DLQHandler, None]:
     """DLQ handler instance with proper lifecycle management."""
     handler = DLQHandler(
@@ -421,7 +422,7 @@ async def dlq_handler(kafka_event_bus: KafkaEventBus) -> AsyncGenerator[DLQHandl
         await handler.stop()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def service_event_manager(kafka_config: Dict[str, Any], service_config: ServiceConfig) -> AsyncGenerator[ServiceEventManager, None]:
     """Service event manager instance with proper lifecycle management."""
     manager = ServiceEventManager(kafka_config, service_config)
@@ -563,13 +564,14 @@ async def wait_for_condition(condition_func: Callable[[], bool], timeout: float 
 
 
 # Test Resource Cleanup
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def cleanup_async_tasks():
     """Automatically cleanup any remaining async tasks after each test."""
     yield
     
-    # Cancel any remaining tasks
-    tasks = [task for task in asyncio.all_tasks() if not task.done()]
+    # Cancel any remaining tasks (excluding current task)
+    current_task = asyncio.current_task()
+    tasks = [task for task in asyncio.all_tasks() if not task.done() and task != current_task]
     if tasks:
         for task in tasks:
             task.cancel()

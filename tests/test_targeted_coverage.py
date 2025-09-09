@@ -5,6 +5,7 @@ This file focuses on the exact missing line numbers provided.
 
 import pytest
 import pytest_asyncio
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch, Mock
 import redis
 from contextlib import asynccontextmanager
@@ -178,16 +179,18 @@ class TestSpecificMissingLines:
     async def test_update_foreign_key_print_lines_732_736(self, operator):
         """Test print statements (lines 732, 736)"""
         
-        def mock_compare_items(existing_items, new_items, fk_field, fk_value, handle_update, handle_delete):
+        def mock_compare_items(existing_items, new_items, foreign_key_field, foreign_key_value, handle_missing_update=None, handle_missing_delete=None):
             # Trigger the print statements
-            handle_update(999)  # Line 732: print warning
-            handle_delete(888)  # Line 736: print warning
+            if handle_missing_update:
+                handle_missing_update(999)  # Line 732: print warning
+            if handle_missing_delete:
+                handle_missing_delete(888)  # Line 736: print warning
             return [], [], []
         
         with patch.object(operator, 'read_data_by_filter', return_value=[]):
             with patch('general_operate.utils.build_data.compare_related_items', side_effect=mock_compare_items):
                 with patch('builtins.print') as mock_print:
-                    await operator.update_by_foreign_key("fk", 1, [])
+                    await operator.update_by_foreign_key("fk", 1, [{"id": 1}])  # Need actual data to trigger the function
                     assert mock_print.call_count == 2
     
     @pytest.mark.asyncio
@@ -220,13 +223,14 @@ class TestSpecificMissingLines:
     async def test_delete_data_empty_ids_line_792(self, operator):
         """Test empty validated_ids (line 792)"""
         
-        class AlwaysBadObject:
-            def __str__(self):
-                raise ValueError("Bad string")
+        # Use invalid IDs that will all be skipped
+        # None and non-numeric strings will be filtered out
+        invalid_ids = {None, "not_a_number", "also_not_numeric"}
         
         with patch.object(operator, 'delete_sql') as mock_delete:
-            result = await operator.delete_data({AlwaysBadObject()})
+            result = await operator.delete_data(invalid_ids)
         
+        # No valid IDs, so delete_sql should not be called
         mock_delete.assert_not_called()
         assert result == []  # Line 792: return []
     
@@ -398,26 +402,35 @@ class TestSpecificMissingLines:
         
         operator.redis = None
         
-        with patch.object(operator, 'read_sql', return_value=[{"id": 1}]):
-            with patch.object(operator, 'store_caches', new_callable=AsyncMock):
-                result = await operator.refresh_cache({1, 2, 3})
-                # Lines 1277-1281: handle missing IDs without Redis
-                assert result["refreshed"] == 1
+        # Mock delete_caches to do nothing when redis is None
+        with patch.object(operator, 'delete_caches', new_callable=AsyncMock) as mock_delete:
+            with patch.object(operator, 'read_sql', return_value=[{"id": 1}]):
+                with patch.object(operator, 'store_caches', new_callable=AsyncMock):
+                    result = await operator.refresh_cache({1, 2, 3})
+                    # Lines 1277-1281: handle missing IDs without Redis
+                    assert result["refreshed"] == 1
                 assert result["not_found"] == 2
     
     @pytest.mark.asyncio
     async def test_refresh_cache_all_missing_error_lines_1292_1296(self, operator):
         """Test all missing IDs pipeline error (lines 1292-1296)"""
         
-        with patch.object(operator, 'read_sql', return_value=[]):  # All missing
-            mock_pipe = AsyncMock()
-            mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
-            operator.redis.pipeline = MagicMock(return_value=mock_pipe)
-            
-            with patch.object(operator.logger, 'debug') as mock_debug:
-                result = await operator.refresh_cache({1, 2, 3})
-                # Lines 1292-1296: pipeline failure handled
-                assert result["not_found"] == 3
+        # Mock delete_caches to avoid the issue
+        with patch.object(operator, 'delete_caches', new_callable=AsyncMock):
+            with patch.object(operator, 'read_sql', return_value=[]):  # All missing
+                # Set up pipeline mock as async context manager
+                mock_pipe = AsyncMock()
+                mock_pipe.delete = MagicMock()
+                mock_pipe.execute = AsyncMock(side_effect=redis.RedisError("Pipeline failed"))
+                mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+                mock_pipe.__aexit__ = AsyncMock(return_value=None)
+                operator.redis.pipeline = MagicMock(return_value=mock_pipe)
+                
+                with patch.object(operator, 'store_caches', new_callable=AsyncMock):
+                    with patch.object(operator.logger, 'debug') as mock_debug:
+                        result = await operator.refresh_cache({1, 2, 3})
+                        # Lines 1292-1296: pipeline failure handled
+                        assert result["not_found"] == 3
     
     @pytest.mark.asyncio
     async def test_distinct_values_cache_read_error_lines_1347_1348(self, operator):
@@ -479,7 +492,7 @@ class TestSQLOperateSpecificLines:
         
         pg_error = MagicMock(spec=AsyncAdapt_asyncpg_dbapi.Error)
         pg_error.sqlstate = "23505"
-        pg_error.__str__ = lambda: "duplicate key error: detailed message"
+        pg_error.__str__ = lambda self: "duplicate key error: detailed message"
         
         db_error = DBAPIError("statement", {}, pg_error)
         

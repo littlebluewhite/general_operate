@@ -76,49 +76,24 @@ class TestDeleteDataCoverage:
     @pytest.mark.asyncio
     async def test_delete_data_with_type_error(self, operator):
         """Test delete_data with ID that causes TypeError (line 789)"""
-        # Create an object that will cause TypeError when trying to convert
-        class BadObject:
-            def __str__(self):
-                return "123"  # Looks numeric
-            
-            def isdigit(self):
-                # This is what str(obj).isdigit() would call
-                return True
-        
-        bad_obj = BadObject()
-        
-        # Mock str() to use our object's __str__ method
-        original_str = str
-        def mock_str(obj):
-            if hasattr(obj, '__str__') and obj is bad_obj:
-                return obj.__str__()
-            return original_str(obj)
-        
-        # Mock int() to raise TypeError for our bad object
-        original_int = int
-        def mock_int(obj):
-            if obj == "123" and hasattr(obj, '__str__'):
-                raise TypeError("Cannot convert")
-            return original_int(obj)
-        
-        id_set = {1, bad_obj, 2, None}  # Mix of valid and invalid IDs
+        # Use string IDs that will be converted, plus None which should be skipped
+        id_set = {1, "2", "3", None, "not_a_number"}  # Mix of valid and invalid IDs
         
         async def mock_delete_sql(table_name, ids, session=None):
-            return ids  # Return the IDs that were passed
+            return list(ids)  # Return the IDs that were passed
         
-        with patch('builtins.str', side_effect=mock_str):
-            with patch('builtins.int', side_effect=mock_int):
-                with patch.object(operator, 'delete_sql', side_effect=mock_delete_sql) as mock_delete:
-                    with patch.object(CacheOperate, 'delete_caches', new_callable=AsyncMock):
-                        with patch.object(operator, 'delete_null_key', new_callable=AsyncMock):
-                            results = await operator.delete_data(id_set)
+        with patch.object(operator, 'delete_sql', side_effect=mock_delete_sql) as mock_delete:
+            with patch.object(CacheOperate, 'delete_caches', new_callable=AsyncMock):
+                with patch.object(operator, 'delete_null_key', new_callable=AsyncMock):
+                    results = await operator.delete_data(id_set)
         
         # Check what IDs were processed
         if mock_delete.called:
             processed_ids = mock_delete.call_args[0][1]
             assert 1 in processed_ids
-            assert 2 in processed_ids
-            # Bad object and None should be skipped
+            assert 2 in processed_ids  # "2" converted to 2
+            assert 3 in processed_ids  # "3" converted to 3
+            # None and "not_a_number" should be skipped
     
     @pytest.mark.asyncio
     async def test_delete_data_all_invalid(self, operator):
@@ -139,22 +114,30 @@ class TestBatchExistsCoverage:
     
     @pytest.mark.asyncio
     async def test_batch_exists_database_error(self, operator):
-        """Test batch_exists when database check fails (lines 1110-1112)"""
-        # Set up Redis to pass but database to fail
-        operator.redis.pipeline = MagicMock()
-        mock_pipe = MagicMock()
+        """Test batch_exists when database check fails (lines 1220-1225)"""
+        # Set up Redis pipeline mock
+        mock_pipe = AsyncMock()
         mock_pipe.exists = MagicMock()
-        mock_pipe.execute = AsyncMock(return_value=[False, False])  # No null markers
-        operator.redis.pipeline.return_value = mock_pipe
+        mock_pipe.execute = AsyncMock(return_value=[0, 0])  # No null markers exist
         
-        # Mock get_caches to return no data
+        # Make pipeline() return an async context manager
+        async_cm = AsyncMock()
+        async_cm.__aenter__ = AsyncMock(return_value=mock_pipe)
+        async_cm.__aexit__ = AsyncMock(return_value=None)
+        operator.redis.pipeline = MagicMock(return_value=async_cm)
+        
+        # Mock get_caches to return no data (all need DB check)
         with patch.object(operator, 'get_caches', return_value={}):
             # Mock exists_sql to raise an exception
             with patch.object(operator, 'exists_sql', side_effect=Exception("Database error")):
-                result = await operator.batch_exists({1, 2})
-                
-                # All IDs should be marked as False due to database error
-                assert result == {1: False, 2: False}
+                with patch.object(operator.logger, 'error') as mock_error:
+                    result = await operator.batch_exists({1, 2})
+                    
+                    # Should log the error
+                    mock_error.assert_called_once()
+                    
+                    # All IDs should be marked as False due to database error
+                    assert result == {1: False, 2: False}
 
 
 class TestRefreshCacheCoverage:

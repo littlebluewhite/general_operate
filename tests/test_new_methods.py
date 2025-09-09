@@ -238,6 +238,9 @@ class TestGeneralOperateMethods:
         mock_pipeline = AsyncMock()
         mock_pipeline.exists = MagicMock()  # Pipeline methods don't return values immediately
         mock_pipeline.execute = AsyncMock(return_value=[False, True, False])  # null marker results
+        # Set up pipeline as async context manager
+        mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
+        mock_pipeline.__aexit__ = AsyncMock(return_value=None)
         operator.redis.pipeline = MagicMock(return_value=mock_pipeline)
         
         # Mock get_caches

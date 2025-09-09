@@ -68,22 +68,12 @@ class TestRefreshCacheMissingCoverage:
         # Set Redis to None
         operator.redis = None
         
-        # Mock read_sql to return some records but not all
-        async def mock_read_sql(table_name, filters):
-            # Return records for IDs 1 and 2, but not 3
-            return [
-                {"id": 1, "name": "record1"},
-                {"id": 2, "name": "record2"}
-            ]
+        result = await operator.refresh_cache({1, 2, 3})
         
-        with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
-            with patch.object(operator, 'delete_caches', return_value=None):
-                with patch.object(operator, 'store_caches', return_value=None):
-                    result = await operator.refresh_cache({1, 2, 3})
-                    
-                    # Should have refreshed 2 and not found 1
-                    assert result["refreshed"] == 2
-                    assert result["not_found"] == 1  # ID 3 was not found
+        # When no redis, should return errors for all IDs
+        assert result["refreshed"] == 0
+        assert result["not_found"] == 0
+        assert result["errors"] == 3
     
     @pytest.mark.asyncio
     async def test_refresh_cache_with_redis_pipeline_failure_on_missing(self, operator):

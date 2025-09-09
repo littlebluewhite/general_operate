@@ -532,15 +532,14 @@ class TestExistsCheckExceptions:
         """Test cache operation failure (lines 1086-1087)"""
         id_value = 1
         
-        # Mock Redis operations to fail
-        operator.redis.exists = AsyncMock(side_effect=redis.RedisError("Redis down"))
-        operator.redis.get_caches = AsyncMock(side_effect=redis.RedisError("Redis down"))
-        
-        with patch.object(operator, 'exists_sql', return_value={1: True}):
+        # Mock CacheOperate.check_null_markers_batch to raise error
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch', 
+                   side_effect=redis.RedisError("Redis down")), \
+             patch.object(operator, 'exists_sql', return_value={1: True}):
             with patch.object(operator.logger, 'warning') as mock_warning:
                 result = await operator.exists_check(id_value)
             
-            # Should log cache failure warning (lines 1086-1087)
+            # Should log cache failure warning
             mock_warning.assert_called()
             assert "Cache check failed" in str(mock_warning.call_args[0][0])
             assert result is True
@@ -576,35 +575,24 @@ class TestBatchExistsExceptions:
         """Test RedisError during null marker operations (line 1219)"""
         id_values = {1, 2, 3}
         
-        # Mock pipeline for null marker checks
-        mock_pipe = AsyncMock()
-        mock_pipe.exists = MagicMock()
-        mock_pipe.execute = AsyncMock(return_value=[False, False, False])  # No null markers
-        mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
-        mock_pipe.__aexit__ = AsyncMock(return_value=None)
-        operator.redis.pipeline = MagicMock(return_value=mock_pipe)
-        
-        # Mock get_caches to return empty (no cache hits)
-        with patch.object(operator, 'get_caches', return_value={}):
-            # Mock exists_sql to return a mix of existing and non-existing
-            mock_exists_sql = AsyncMock(return_value={1: True, 2: False, 3: False})
+        # Mock check_null_markers_batch to return no null markers
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch', 
+                   new=AsyncMock(return_value=({}, {1, 2, 3}))), \
+             patch.object(operator, 'get_caches', return_value={}), \
+             patch.object(operator, 'exists_sql', return_value={1: True, 2: False, 3: False}), \
+             patch('general_operate.app.cache_operate.CacheOperate.set_null_markers_batch', 
+                   side_effect=redis.RedisError("Redis error")) as mock_set_null:
+            with patch.object(operator.logger, 'debug') as mock_debug:
+                result = await operator.batch_exists(id_values)
             
-            # Mock set_null_key to raise RedisError for non-existent items
-            mock_set_null = AsyncMock(side_effect=redis.RedisError("Redis error"))
+            # Should try to set null markers for non-existent items (2 and 3)
+            # set_null_markers_batch should be called once with the non-existent IDs
+            mock_set_null.assert_called_once()
+            call_args = mock_set_null.call_args[0]
+            assert set(call_args[2]) == {2, 3}  # The non-existent IDs
             
-            with patch.object(operator, 'exists_sql', mock_exists_sql):
-                with patch.object(operator, 'set_null_key', mock_set_null):
-                    with patch.object(operator.logger, 'debug') as mock_debug:
-                        result = await operator.batch_exists(id_values)
-                    
-                    # Should log debug message for null marker failure (line 1219) 
-                    # Check that set_null_key was called for non-existent items (2 and 3)
-                    assert mock_set_null.call_count == 2
-                    
-                    # Debug log should be called for both failed null marker operations
-                    debug_calls = [str(call) for call in mock_debug.call_args_list]
-                    # At least one debug call should mention the failure
-                    assert mock_debug.call_count >= 2  # At least for the two failed null markers
+            # Debug log should be called for the failed null marker operation
+            assert mock_debug.call_count >= 1
 
 
 class TestRefreshCacheExceptions:

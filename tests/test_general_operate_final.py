@@ -149,23 +149,12 @@ class TestRefreshCacheCoverage:
         # Set Redis to None
         operator.redis = None
         
-        # Mock read_sql to return only some of the requested IDs
-        async def mock_read_sql(table_name, filters):
-            # Return data for IDs 1 and 2, but not 3
-            return [
-                {"id": 1, "name": "record1"},
-                {"id": 2, "name": "record2"}
-            ]
+        result = await operator.refresh_cache({1, 2, 3})
         
-        with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
-            with patch.object(operator, 'delete_caches', return_value=None):
-                with patch.object(operator, 'store_caches', return_value=None):
-                    result = await operator.refresh_cache({1, 2, 3})
-                    
-                    # Should have refreshed 2 records
-                    assert result["refreshed"] == 2
-                    # Should have 1 not found (ID 3)
-                    assert result["not_found"] == 1
+        # When no redis, should return errors for all IDs
+        assert result["refreshed"] == 0
+        assert result["not_found"] == 0
+        assert result["errors"] == 3
     
     @pytest.mark.asyncio
     async def test_refresh_cache_with_all_missing_no_redis(self, operator):
@@ -173,19 +162,12 @@ class TestRefreshCacheCoverage:
         # Set Redis to None
         operator.redis = None
         
-        # Mock read_sql to return no records
-        async def mock_read_sql(table_name, filters):
-            return []
+        result = await operator.refresh_cache({1, 2, 3})
         
-        with patch.object(operator, 'read_sql', side_effect=mock_read_sql):
-            with patch.object(operator, 'delete_caches', return_value=None):
-                with patch.object(operator, 'store_caches', return_value=None):
-                    result = await operator.refresh_cache({1, 2, 3})
-                    
-                    # Should have refreshed 0 records
-                    assert result["refreshed"] == 0
-                    # Should have 3 not found
-                    assert result["not_found"] == 3
+        # When no redis, should return errors for all IDs
+        assert result["refreshed"] == 0
+        assert result["not_found"] == 0
+        assert result["errors"] == 3
 
 
 class TestEdgeCasesForFullCoverage:

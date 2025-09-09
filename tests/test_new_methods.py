@@ -207,26 +207,26 @@ class TestGeneralOperateMethods:
     @pytest.mark.asyncio
     async def test_exists_check(self, operator):
         """Test exists_check method"""
-        # Mock cache check
-        operator.redis = AsyncMock()
-        operator.redis.exists.return_value = False
-        
-        # Mock get_caches to return empty (cache miss)
-        with patch.object(operator, 'get_caches', return_value=None):
-            # Mock exists_sql to return True
-            with patch.object(operator, 'exists_sql', return_value={123: True}):
-                result = await operator.exists_check(123)
-                assert result is True
+        # Mock cache check - no null marker exists
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   new=AsyncMock(return_value=({}, {123}))), \
+             patch.object(operator, 'get_caches', return_value=None), \
+             patch.object(operator, 'exists_sql', return_value={123: True}):
+            result = await operator.exists_check(123)
+            assert result is True
         
         # Test with cache hit
-        with patch.object(operator, 'get_caches', return_value=[{"id": 456}]):
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   new=AsyncMock(return_value=({}, {456}))), \
+             patch.object(operator, 'get_caches', return_value=[{"id": 456}]):
             result = await operator.exists_check(456)
             assert result is True
         
         # Test with null marker
-        operator.redis.exists.return_value = True
-        result = await operator.exists_check(789)
-        assert result is False
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   new=AsyncMock(return_value=({789: True}, set()))):
+            result = await operator.exists_check(789)
+            assert result is False
     
     @pytest.mark.asyncio
     async def test_batch_exists(self, operator):

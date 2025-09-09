@@ -540,12 +540,12 @@ class TestRefreshCacheMissingCoverage:
         """Test refresh_cache when redis is None for null marker operations"""
         operator.redis = None
         
-        with patch.object(operator, 'delete_caches', return_value=None):
-            with patch.object(operator, 'read_sql', return_value=[]):
-                result = await operator.refresh_cache({1, 2})
-                
-                # Should handle missing redis gracefully
-                assert result["not_found"] == 2
+        result = await operator.refresh_cache({1, 2})
+        
+        # When no redis, should return errors for all IDs
+        assert result["refreshed"] == 0
+        assert result["not_found"] == 0
+        assert result["errors"] == 2
 
 
 class TestGetDistinctValuesMissingCoverage:

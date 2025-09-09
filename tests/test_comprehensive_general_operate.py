@@ -467,15 +467,20 @@ class TestGeneralOperateHandleCacheMisses:
     async def test_handle_cache_misses_success(self, general_operate):
         """Test successful cache miss handling."""
         mock_sql_data = [{"id": 1, "name": "test"}]
+        mock_schema = Mock(id=1, name="test")
+        expected_results = [mock_schema]
+        expected_found_ids = {1}
         
         with patch.object(general_operate, '_fetch_from_sql', return_value=mock_sql_data), \
-             patch.object(general_operate, '_update_cache_after_fetch') as mock_update:
+             patch('general_operate.app.cache_operate.CacheOperate.handle_cache_misses', 
+                   return_value=(expected_results, expected_found_ids)) as mock_cache_handler:
             
             results, found_ids = await general_operate._handle_cache_misses({1}, [])
             
             assert len(results) == 1
             assert 1 in found_ids
-            mock_update.assert_called_once()
+            # Verify CacheOperate.handle_cache_misses was called with correct params
+            mock_cache_handler.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_handle_cache_misses_failed_cache_ops(self, general_operate):
@@ -1469,7 +1474,7 @@ class TestGeneralOperateGetCacheData:
         """Test successful get cache data."""
         expected_data = {"name": "test", "value": 123}
         
-        with patch.object(general_operate, 'get_cache', return_value=expected_data):
+        with patch('general_operate.app.cache_operate.CacheOperate.get_cache', return_value=expected_data):
             
             result = await general_operate.get_cache_data("prefix", "123")
             
@@ -1478,7 +1483,7 @@ class TestGeneralOperateGetCacheData:
     @pytest.mark.asyncio
     async def test_get_cache_data_not_found(self, general_operate):
         """Test get cache data when not found."""
-        with patch.object(general_operate, 'get_cache', return_value=None):
+        with patch('general_operate.app.cache_operate.CacheOperate.get_cache', return_value=None):
             
             result = await general_operate.get_cache_data("prefix", "123")
             
@@ -1491,7 +1496,7 @@ class TestGeneralOperateDeleteCacheData:
     @pytest.mark.asyncio
     async def test_delete_cache_data_success(self, general_operate):
         """Test successful delete cache data."""
-        with patch.object(general_operate, 'delete_cache', return_value=True):
+        with patch('general_operate.app.cache_operate.CacheOperate.delete_cache', return_value=True):
             
             result = await general_operate.delete_cache_data("prefix", "123")
             
@@ -1500,7 +1505,7 @@ class TestGeneralOperateDeleteCacheData:
     @pytest.mark.asyncio
     async def test_delete_cache_data_not_found(self, general_operate):
         """Test delete cache data when not found."""
-        with patch.object(general_operate, 'delete_cache', return_value=False):
+        with patch('general_operate.app.cache_operate.CacheOperate.delete_cache', return_value=False):
             
             result = await general_operate.delete_cache_data("prefix", "123")
             

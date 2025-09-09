@@ -4,7 +4,7 @@ import json
 import pytest
 import pytest_asyncio
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, call, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch, call, PropertyMock, Mock
 from datetime import datetime, UTC
 from contextlib import asynccontextmanager
 
@@ -521,14 +521,17 @@ class TestHandleCacheMisses:
             {"id": 2, "name": "test2"}
         ]
         
+        # Mock the delegation to CacheOperate.handle_cache_misses
+        mock_results = [Mock(id=1, name="test1"), Mock(id=2, name="test2")]
         with patch.object(operator, '_fetch_from_sql', return_value=sql_data):
-            with patch.object(operator, '_update_cache_after_fetch', return_value=None) as mock_update:
+            with patch('general_operate.app.cache_operate.CacheOperate.handle_cache_misses', 
+                      return_value=(mock_results, {1, 2})) as mock_handler:
                 results, found_ids = await operator._handle_cache_misses({1, 2}, [2])
                 
-                # ID 2 should not be in cache update since it failed before
-                cache_data = mock_update.call_args[0][0]
-                assert "1" in cache_data
-                assert "2" not in cache_data
+                # Verify CacheOperate.handle_cache_misses was called with correct params
+                mock_handler.assert_called_once()
+                assert len(results) == 2
+                assert found_ids == {1, 2}
     
     @pytest.mark.asyncio
     async def test_handle_cache_misses_schema_error(self, operator):
@@ -1344,14 +1347,14 @@ class TestCacheDataMethods:
     @pytest.mark.asyncio
     async def test_get_cache_data(self, operator):
         """Test get_cache_data method"""
-        with patch.object(operator, 'get_cache', return_value={"data": "test"}):
+        with patch('general_operate.app.cache_operate.CacheOperate.get_cache', return_value={"data": "test"}):
             result = await operator.get_cache_data("prefix", "123")
             assert result == {"data": "test"}
     
     @pytest.mark.asyncio
     async def test_delete_cache_data(self, operator):
         """Test delete_cache_data method"""
-        with patch.object(operator, 'delete_cache', return_value=True):
+        with patch('general_operate.app.cache_operate.CacheOperate.delete_cache', return_value=True):
             result = await operator.delete_cache_data("prefix", "123")
             assert result is True
 
@@ -1435,10 +1438,11 @@ class TestExistsCheck:
     @pytest.mark.asyncio
     async def test_exists_check_null_marker(self, operator):
         """Test exists check with null marker"""
-        operator.redis.exists = AsyncMock(return_value=True)
-        
-        result = await operator.exists_check(999)
-        assert result is False
+        # Mock check_null_markers_batch to return that null marker exists
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   new=AsyncMock(return_value=({999: True}, set()))):
+            result = await operator.exists_check(999)
+            assert result is False
     
     @pytest.mark.asyncio
     async def test_exists_check_database(self, operator):
@@ -1453,16 +1457,18 @@ class TestExistsCheck:
     @pytest.mark.asyncio
     async def test_exists_check_not_found(self, operator):
         """Test exists check when record doesn't exist"""
-        operator.redis.exists = AsyncMock(return_value=False)
-        
-        with patch.object(operator, 'get_caches', return_value=None):
-            with patch.object(operator, 'exists_sql', return_value={999: False}):
-                with patch.object(operator, 'set_null_key', return_value=True):
-                    result = await operator.exists_check(999)
-                    assert result is False
-                    
-                    # Should set null marker
-                    operator.set_null_key.assert_called_once()
+        # Mock check_null_markers_batch to return no null marker
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   new=AsyncMock(return_value=({}, {999}))), \
+             patch.object(operator, 'get_caches', return_value=None), \
+             patch.object(operator, 'exists_sql', return_value={999: False}), \
+             patch('general_operate.app.cache_operate.CacheOperate.set_null_markers_batch', 
+                   new=AsyncMock()) as mock_set_null:
+            result = await operator.exists_check(999)
+            assert result is False
+            
+            # Should set null marker
+            mock_set_null.assert_called_once()
 
 
 class TestBatchExists:

@@ -265,7 +265,9 @@ class TestGeneralOperateExistsCheck:
     @pytest.mark.asyncio
     async def test_exists_check_cache_null_marker(self, general_operate):
         """Test exists check with cache null marker."""
-        with patch.object(general_operate.redis, 'exists', new=AsyncMock(return_value=1)):  # Null marker exists
+        # Mock CacheOperate.check_null_markers_batch to return that null marker exists
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch', 
+                   new=AsyncMock(return_value=({123: True}, set()))):
             
             result = await general_operate.exists_check(123)
             
@@ -295,15 +297,16 @@ class TestGeneralOperateExistsCheck:
     @pytest.mark.asyncio
     async def test_exists_check_not_exists(self, general_operate):
         """Test exists check when record doesn't exist."""
-        with patch.object(general_operate.redis, 'exists', new=AsyncMock(return_value=0)), \
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch', 
+                   new=AsyncMock(return_value=({}, {123}))), \
              patch.object(general_operate, 'get_caches', new=AsyncMock(return_value=[])), \
              patch.object(general_operate, 'exists_sql', new=AsyncMock(return_value={123: False})), \
-             patch.object(general_operate, 'set_null_key', new=AsyncMock()) as mock_set_null:
+             patch('general_operate.app.cache_operate.CacheOperate.set_null_markers_batch', new=AsyncMock()) as mock_set_null:
             
             result = await general_operate.exists_check(123)
             
             assert result is False
-            mock_set_null.assert_called_once_with("test_table:123:null", 300)
+            mock_set_null.assert_called_once_with(general_operate, "test_table", [123], expiry_seconds=300)
     
     @pytest.mark.asyncio
     async def test_exists_check_cache_error(self, general_operate):
@@ -379,20 +382,19 @@ class TestGeneralOperateBatchExists:
     @pytest.mark.asyncio
     async def test_batch_exists_cache_miss_database_check(self, general_operate):
         """Test batch exists with cache miss requiring database check."""
-        mock_pipeline = AsyncMock()
-        mock_pipeline.execute.return_value = [0, 0]  # No null markers
-        general_operate.redis.pipeline.return_value.__aenter__ = AsyncMock(return_value=mock_pipeline)
-        general_operate.redis.pipeline.return_value.__aexit__ = AsyncMock(return_value=None)
-        
-        with patch.object(general_operate, 'get_caches', new=AsyncMock(return_value={})), \
+        # Mock check_null_markers_batch to return no null markers
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch', 
+                   new=AsyncMock(return_value=({}, {1, 2}))), \
+             patch.object(general_operate, 'get_caches', new=AsyncMock(return_value={})), \
              patch.object(general_operate, 'exists_sql', new=AsyncMock(return_value={1: True, 2: False})), \
-             patch.object(general_operate, 'set_null_key', new=AsyncMock()) as mock_set_null:
+             patch('general_operate.app.cache_operate.CacheOperate.set_null_markers_batch', new=AsyncMock()) as mock_set_null:
             
             result = await general_operate.batch_exists({1, 2})
             
             assert result[1] is True
             assert result[2] is False
-            mock_set_null.assert_called_once()  # Only for ID 2
+            # set_null_markers_batch should be called only for non-existent IDs
+            mock_set_null.assert_called_once_with(general_operate, "test_table", [2], expiry_seconds=300)
     
     @pytest.mark.asyncio
     async def test_batch_exists_cache_pipeline_error(self, general_operate):
@@ -514,12 +516,12 @@ class TestGeneralOperateRefreshCache:
         """Test refresh cache without Redis."""
         general_operate.redis = None
         
-        with patch.object(general_operate, 'read_sql', new=AsyncMock(return_value=[])), \
-             patch.object(general_operate, 'delete_caches', new=AsyncMock()):
-            
-            result = await general_operate.refresh_cache({1})
-            
-            assert result["not_found"] == 1
+        result = await general_operate.refresh_cache({1})
+        
+        # When no redis, should return errors for all IDs
+        assert result["refreshed"] == 0
+        assert result["not_found"] == 0
+        assert result["errors"] == 1
     
     @pytest.mark.asyncio
     async def test_refresh_cache_pipeline_error(self, general_operate):

@@ -1,6 +1,4 @@
-import json
 from abc import ABC, abstractmethod
-from datetime import datetime, UTC
 from typing import Any, Generic, TypeVar
 from contextlib import asynccontextmanager
 import redis
@@ -12,7 +10,6 @@ from .app.client.influxdb import InfluxDB
 from .app.influxdb_operate import InfluxOperate
 from .app.sql_operate import SQLOperate
 from .core import handle_errors
-from .utils.json_encoder import EnhancedJSONEncoder
 
 T = TypeVar('T')
 
@@ -96,6 +93,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Returns:
             Formatted cache key string
         """
+        # Delegate to CacheOperate
+        if hasattr(self, 'redis') and self.redis:
+            return CacheOperate.build_cache_key(self, self.table_name, record_id)
         return f"{self.table_name}:{record_id}"
     
     def _build_null_marker_key(self, record_id: Any) -> str:
@@ -107,6 +107,9 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Returns:
             Formatted null marker key string
         """
+        # Delegate to CacheOperate
+        if hasattr(self, 'redis') and self.redis:
+            return CacheOperate.build_null_marker_key(self, self.table_name, record_id)
         return f"{self.table_name}:{record_id}:null"
     
     def _validate_with_schema(self, data: dict, schema_type: str = "main") -> Any:
@@ -130,7 +133,8 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         schema = schema_map.get(schema_type, self.main_schemas)
         return schema(**data)
     
-    def _process_in_batches(self, items: list, batch_size: int = 100):
+    @staticmethod
+    def _process_in_batches(items: list, batch_size: int = 100):
         """Generator to process items in batches.
         
         Args:
@@ -140,8 +144,8 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Yields:
             Batches of items
         """
-        for i in range(0, len(items), batch_size):
-            yield items[i:i + batch_size]
+        # Delegate to CacheOperate's static method
+        return CacheOperate.process_in_batches(items, batch_size)
 
     @abstractmethod
     def get_module(self):
@@ -168,56 +172,31 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
     @handle_errors(operation="cache_warming")
     async def cache_warming(self, limit: int = 1000, offset: int = 0):
         """Warm up cache by loading data from SQL in batches"""
-        batch_size = min(limit, 500)  # Limit batch size to prevent memory issues
-        current_offset = offset
-        total_loaded = 0
-
-        while True:
-            # Read batch from SQL
-            batch_results = await self.read_sql(
-                table_name=self.table_name, limit=batch_size, offset=current_offset
+        # Delegate to CacheOperate with SQL fetch function
+        if hasattr(self, 'redis') and self.redis:
+            return await CacheOperate.cache_warming(
+                self,
+                table_name=self.table_name,
+                fetch_function=self.read_sql,
+                limit=limit,
+                offset=offset
             )
-
-            if not batch_results:
-                # No more data to load
-                break
-
-            # Prepare cache data
-            cache_data_to_set = {}
-            for sql_row in batch_results:
-                if sql_row and "id" in sql_row:
-                    cache_data_to_set[str(sql_row["id"])] = sql_row
-
-            # Batch write to cache
-            if cache_data_to_set:
-                await self.store_caches(self.table_name, cache_data_to_set)
-                total_loaded += len(cache_data_to_set)
-
-            # Check if we've reached the limit
-            if len(batch_results) < batch_size or total_loaded >= limit:
-                break
-
-            current_offset += batch_size
-
+        
+        # Fallback implementation if no cache
         return {
-            "success": True,
-            "records_loaded": total_loaded,
-            "message": f"Successfully warmed cache with {total_loaded} records",
+            "success": False,
+            "records_loaded": 0,
+            "message": "Cache not available",
         }
 
     @handle_errors(operation="cache_clear")
     async def cache_clear(self):
         """Clear all cache data for this table"""
-        # Clear main cache
-        await self.redis.delete(self.table_name)
-
-        # Clear null markers using pattern matching
-        pattern = f"{self.table_name}:*:null"
-        keys = await self.redis.keys(pattern)
-        if keys:
-            await self.redis.delete(*keys)
-
-        return {"success": True, "message": "Cache cleared successfully"}
+        # Delegate to CacheOperate
+        if hasattr(self, 'redis') and self.redis:
+            return await CacheOperate.cache_clear(self, self.table_name)
+        
+        return {"success": False, "message": "Cache not available"}
 
     async def _process_cache_lookups(self, id_value: set) -> tuple[list, set, set, list]:
         """Process cache lookups for given IDs.
@@ -225,46 +204,28 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Returns:
             Tuple of (results, cache_miss_ids, null_marked_ids, failed_cache_ops)
         """
-        results = []
-        cache_miss_ids = set()
-        null_marked_ids = set()
-        failed_cache_ops = []
+        if not hasattr(self, 'redis') or not self.redis:
+            # No cache available, all are cache misses
+            return [], id_value, set(), []
+            
+        # Get raw cache results from CacheOperate
+        cache_results, cache_miss_ids, null_marked_ids, failed_cache_ops = await CacheOperate.process_cache_lookups(
+            self,
+            table_name=self.table_name,
+            id_values=id_value
+        )
         
-        for id_key in id_value:
+        # Apply schema validation to cached data
+        results = []
+        for cache_item in cache_results:
             try:
-                # Check cache first to avoid database hit
-                # Null markers indicate records that were previously checked and don't exist
-                null_key = f"{self.table_name}:{id_key}:null"
-                is_null_marked = await self.redis.exists(null_key)
-
-                if is_null_marked:
-                    # Record was previously checked and doesn't exist in database
-                    # Skip further processing to avoid unnecessary DB queries
-                    null_marked_ids.add(id_key)
-                    continue
-
-                # Attempt to retrieve data from cache
-                # Cache hit means we can avoid expensive database query
-                cached_data = await self.get_caches(self.table_name, {str(id_key)})
-                if cached_data:
-                    # Parse and validate cached data against schema
-                    # This ensures data integrity even from cache
-                    for cache_item in cached_data:
-                        try:
-                            schema_data = self.main_schemas(**cache_item)
-                            results.append(schema_data)
-                        except Exception as schema_err:
-                            self.logger.warning(f"Schema validation failed for {self.table_name}:{id_key}: {schema_err}")
-                            cache_miss_ids.add(id_key)
-                else:
-                    cache_miss_ids.add(id_key)
-
-            except (redis.RedisError, Exception) as cache_err:
-                # Cache failures are non-fatal - fall back to database
-                # Track failed operations to avoid retry attempts
-                self.logger.warning(f"Cache operation failed for {self.table_name}:{id_key}: {cache_err}")
-                failed_cache_ops.append(id_key)
-                cache_miss_ids.add(id_key)
+                schema_data = self.main_schemas(**cache_item)
+                results.append(schema_data)
+            except Exception as schema_err:
+                self.logger.warning(f"Schema validation failed for cached item: {schema_err}")
+                # Add to cache miss to refetch from DB
+                if 'id' in cache_item:
+                    cache_miss_ids.add(cache_item['id'])
                 
         return results, cache_miss_ids, null_marked_ids, failed_cache_ops
     
@@ -276,32 +237,35 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         """
         if not cache_miss_ids:
             return [], set()
+        
+        # Use CacheOperate's handler with schema validator
+        if hasattr(self, 'redis') and self.redis:
+            def schema_validator(_sql_row):
+                return self.main_schemas(**_sql_row)
             
+            return await CacheOperate.handle_cache_misses(
+                self,
+                table_name=self.table_name,
+                cache_miss_ids=cache_miss_ids,
+                failed_cache_ops=failed_cache_ops,
+                fetch_function=self._fetch_from_sql,
+                schema_validator=schema_validator
+            )
+        
+        # Fallback: just fetch from SQL without caching
         sql_results = await self._fetch_from_sql(cache_miss_ids)
         schema_results = []
         found_ids = set()
-        cache_data_to_set = {}
-
+        
         for sql_row in sql_results:
             if sql_row:
                 try:
-                    # Convert SQL result to schema object
                     schema_data = self.main_schemas(**sql_row)
                     schema_results.append(schema_data)
-
-                    # Prepare for cache update (skip if cache operation previously failed)
-                    # This avoids attempting cache operations that are likely to fail again
-                    if sql_row["id"] not in failed_cache_ops:
-                        found_ids.add(sql_row["id"])
-                        cache_data_to_set[str(sql_row["id"])] = sql_row
+                    found_ids.add(sql_row["id"])
                 except Exception as schema_err:
-                    self.logger.error(f"Schema validation failed for SQL result {sql_row.get('id', 'unknown')}: {schema_err}")
-                    continue
-
-        # Update cache with fetched data
-        if cache_data_to_set:
-            await self._update_cache_after_fetch(cache_data_to_set)
-            
+                    self.logger.error(f"Schema validation failed: {schema_err}")
+        
         return schema_results, found_ids
     
     async def _update_cache_after_fetch(self, cache_data: dict) -> None:
@@ -310,13 +274,12 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Args:
             cache_data: Dictionary mapping cache keys to data
         """
-        try:
-            cache_success = await self.store_caches(self.table_name, cache_data)
-            if not cache_success:
-                self.logger.warning(f"Cache write failed for {len(cache_data)} items")
-        except Exception as cache_err:
-            # Cache update failures are non-fatal - log and continue
-            self.logger.warning(f"Cache write error: {cache_err}")
+        if hasattr(self, 'redis') and self.redis:
+            await CacheOperate.update_cache_after_fetch(
+                self,
+                table_name=self.table_name,
+                cache_data=cache_data
+            )
     
     async def _mark_missing_records(self, missing_ids: set, failed_cache_ops: list) -> None:
         """Mark records that don't exist in database with null markers.
@@ -325,15 +288,13 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             missing_ids: Set of IDs that don't exist in database
             failed_cache_ops: List of IDs where cache operations failed
         """
-        for missing_id in missing_ids:
-            # Skip IDs where cache operations previously failed
-            if missing_id not in failed_cache_ops:
-                try:
-                    null_key = f"{self.table_name}:{missing_id}:null"
-                    # Set null marker with 5-minute expiry to avoid repeated DB lookups
-                    await self.set_null_key(null_key, 300)
-                except Exception as null_err:
-                    self.logger.warning(f"Failed to set null marker for {missing_id}: {null_err}")
+        if hasattr(self, 'redis') and self.redis:
+            await CacheOperate.mark_missing_records(
+                self,
+                table_name=self.table_name,
+                missing_ids=missing_ids,
+                failed_cache_ops=failed_cache_ops
+            )
 
     @handle_errors(operation="read_data_by_id")
     async def read_data_by_id(self, id_value: set) -> list[T]:
@@ -603,29 +564,14 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Returns:
             List of cache deletion errors (for logging)
         """
-        cache_delete_errors = []
-        
-        if not cache_keys:
-            return cache_delete_errors
-            
-        try:
-            # Delete main cache entries
-            deleted_count = await CacheOperate.delete_caches(self, self.table_name, set(cache_keys))
-            self.logger.debug(f"Cache cleanup: deleted {deleted_count} entries")
-
-            # Delete null markers for ID-based cache keys
-            for record_id in cache_keys:
-                null_key = f"{self.table_name}:{record_id}:null"
-                try:
-                    await self.delete_null_key(null_key)
-                except Exception as null_err:
-                    cache_delete_errors.append(f"null marker {record_id}: {null_err}")
-
-        except Exception as cache_err:
-            cache_delete_errors.append(f"cache cleanup: {cache_err}")
-            self.logger.warning(f"Cache cleanup failed in {operation_context}: {cache_err}")
-            
-        return cache_delete_errors
+        if hasattr(self, 'redis') and self.redis:
+            return await CacheOperate.clear_update_caches(
+                self,
+                table_name=self.table_name,
+                cache_keys=cache_keys,
+                operation_context=operation_context
+            )
+        return []
     
     async def _convert_update_results(self, updated_records: list) -> tuple[list, list]:
         """Convert updated records to schema objects.
@@ -839,7 +785,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                     str(record_id) for record_id in successfully_deleted_ids
                 }
                 await CacheOperate.delete_caches(self, self.table_name, cache_keys)
-            except (redis.RedisError, AttributeError) as e:
+            except Exception as e:
                 # Cache delete failed, but SQL delete succeeded - log but don't fail
                 self.logger.warning(f"Cache cleanup failed in delete_data: {type(e).__name__}: {str(e)}")
                 pass
@@ -849,7 +795,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                 try:
                     null_key = f"{self.table_name}:{record_id}:null"
                     await self.delete_null_key(null_key)
-                except (redis.RedisError, AttributeError) as e:
+                except Exception as e:
                     # Null marker delete failed, but main delete succeeded - non-critical
                     self.logger.debug(f"Failed to delete null marker for {record_id}: {type(e).__name__}")
                     pass
@@ -884,12 +830,12 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                         null_key = f"{self.table_name}:{record_id}:null"
                         try:
                             await self.delete_null_key(null_key)
-                        except (redis.RedisError, AttributeError) as e:
+                        except Exception as e:
                             # Non-critical error - log but continue
                             self.logger.debug(f"Failed to delete null marker in delete_filter_data: {type(e).__name__}")
                             pass
 
-                except (redis.RedisError, AttributeError) as e:
+                except Exception as e:
                     # Cache delete failed, but SQL delete succeeded - non-critical
                     self.logger.warning(f"Cache cleanup failed in delete_filter_data: {type(e).__name__}")
                     pass
@@ -960,37 +906,23 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
     async def store_cache_data(
             self, prefix: str, identifier: str, data: dict[str, Any], ttl_seconds: int | None = None
     ) -> None:
-        """儲存資料到 Redis"""
-        key = f"{prefix}:{identifier}"
-
-        # 添加元數據
-        enriched_data = {
-            **data,
-            "_created_at": datetime.now(UTC).isoformat(),
-            "prefix": prefix,
-            "_identifier": identifier
-        }
-
-        # 序列化資料
-        serialized_data = json.dumps(enriched_data, ensure_ascii=False, cls=EnhancedJSONEncoder)
-
-        # 儲存到 Redis
-        await self.redis.setex(key, ttl_seconds, serialized_data)
-
-        self.logger.debug(
-            "Data stored in Redis",
-            key=key,
-            prefix=prefix,
-            ttl_seconds=ttl_seconds
-        )
+        """Store data to Redis cache - backward compatibility wrapper"""
+        if hasattr(self, 'redis') and self.redis:
+            await CacheOperate.store_cache(self, prefix, identifier, data, ttl_seconds)
+        else:
+            self.logger.warning("Cache not available for store_cache_data")
 
     async def get_cache_data(self, prefix: str, identifier: str) -> dict[str, Any] | None:
-        """Get data from Redis cache"""
-        return await self.get_cache(prefix, identifier)
+        """Get data from Redis cache - backward compatibility wrapper"""
+        if hasattr(self, 'redis') and self.redis:
+            return await CacheOperate.get_cache(self, prefix, identifier)
+        return None
 
     async def delete_cache_data(self, prefix: str, identifier: str) -> bool:
-        """Delete data from Redis cache"""
-        return await self.delete_cache(prefix, identifier)
+        """Delete data from Redis cache - backward compatibility wrapper"""
+        if hasattr(self, 'redis') and self.redis:
+            return await CacheOperate.delete_cache(self, prefix, identifier)
+        return False
 
     @handle_errors(operation="upsert_data")
     async def upsert_data(
@@ -1114,22 +1046,24 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         self.logger.debug(f"Starting {operation_context}")
         
         # Check cache first
-        try:
-            # Check for null marker
-            null_key = f"{self.table_name}:{id_value}:null"
-            is_null_marked = await self.redis.exists(null_key)
-            
-            if is_null_marked:
-                self.logger.debug(f"{operation_context} - Found null marker, returning False")
-                return False
-            
-            # Try to get from cache
-            cached_data = await self.get_caches(self.table_name, {str(id_value)})
-            if cached_data:
-                self.logger.debug(f"{operation_context} - Found in cache, returning True")
-                return True
-        except Exception as cache_err:
-            self.logger.warning(f"Cache check failed in {operation_context}: {cache_err}")
+        if self.redis:
+            try:
+                # Check for null marker using CacheOperate
+                null_marker_status, non_null_ids = await CacheOperate.check_null_markers_batch(
+                    self, self.table_name, [id_value]
+                )
+                
+                if null_marker_status.get(id_value, False):
+                    self.logger.debug(f"{operation_context} - Found null marker, returning False")
+                    return False
+                
+                # Try to get from cache
+                cached_data = await self.get_caches(self.table_name, {str(id_value)})
+                if cached_data:
+                    self.logger.debug(f"{operation_context} - Found in cache, returning True")
+                    return True
+            except Exception as cache_err:
+                self.logger.warning(f"Cache check failed in {operation_context}: {cache_err}")
         
         # Check database
         try:
@@ -1141,13 +1075,14 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
             exists = result.get(id_value, False)
             
             # Update cache based on result
-            if not exists:
-                # Set null marker for non-existent record
+            if not exists and self.redis:
+                # Set null marker for non-existent record using CacheOperate
                 try:
-                    null_key = f"{self.table_name}:{id_value}:null"
-                    await self.set_null_key(null_key, 300)  # 5 minutes
-                except:
-                    pass
+                    await CacheOperate.set_null_markers_batch(
+                        self, self.table_name, [id_value], expiry_seconds=300
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Failed to set null marker for {id_value}: {e}")
             
             self.logger.debug(f"Completed {operation_context}, exists={exists}")
             return exists
@@ -1177,28 +1112,18 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         result = {}
         unchecked_ids = set()
         
-        # Check cache first using pipeline for better performance
+        # Check cache first using CacheOperate batch methods
         if self.redis:
             try:
-                # Use Redis pipeline for batch operations
-                async with self.redis.pipeline(transaction=False) as pipe:
-                    # Queue all null marker checks
-                    null_keys = {}
-                    for id_val in id_values:
-                        null_key = f"{self.table_name}:{id_val}:null"
-                        null_keys[id_val] = null_key
-                        pipe.exists(null_key)  # Pipeline queues the command
-                    
-                    # Execute all null marker checks at once
-                    null_results = await pipe.execute()
+                # Check null markers using CacheOperate batch method
+                null_marker_status, non_null_ids = await CacheOperate.check_null_markers_batch(
+                    self, self.table_name, list(id_values)
+                )
                 
                 # Process null marker results
-                non_null_ids = []
-                for id_val, is_null_marked in zip(id_values, null_results):
-                    if is_null_marked:
-                        result[id_val] = False
-                    else:
-                        non_null_ids.append(id_val)
+                for id_val, has_null_marker in null_marker_status.items():
+                    if has_null_marker:
+                        result[id_val] = False  # Null marker exists = record doesn't exist
                 
                 # Check cache for non-null IDs
                 if non_null_ids:
@@ -1210,7 +1135,7 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                             unchecked_ids.add(id_val)
                             
             except Exception as cache_err:
-                self.logger.warning(f"Cache pipeline check failed: {cache_err}")
+                self.logger.warning(f"Cache batch check failed: {cache_err}")
                 # Fallback: all IDs need database check
                 unchecked_ids = set(id_values)
         else:
@@ -1226,19 +1151,23 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
                     session=session
                 )
                 
-                # Merge results and update cache
+                # Merge results
+                non_existent_ids = []
                 for id_val in unchecked_ids:
                     exists = db_result.get(id_val, False)
                     result[id_val] = exists
-                    
-                    # Set null marker for non-existent records
                     if not exists:
-                        try:
-                            null_key = f"{self.table_name}:{id_val}:null"
-                            await self.set_null_key(null_key, 300)  # 5 minutes
-                        except (redis.RedisError, ConnectionError) as e:
-                            # Log but don't fail the operation for cache issues
-                            self.logger.debug(f"Failed to set null marker for {id_val}: {e}")
+                        non_existent_ids.append(id_val)
+                
+                # Batch set null markers for non-existent records
+                if non_existent_ids and self.redis:
+                    try:
+                        await CacheOperate.set_null_markers_batch(
+                            self, self.table_name, non_existent_ids, expiry_seconds=300
+                        )
+                    except Exception as e:
+                        # Log but don't fail the operation for cache issues
+                        self.logger.debug(f"Failed to set null markers batch: {e}")
                             
             except Exception as e:
                 self.logger.error(f"Database check failed in {operation_context}: {str(e)}")
@@ -1263,94 +1192,17 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         if not id_values:
             return {"refreshed": 0, "not_found": 0, "errors": 0}
         
-        operation_context = f"refresh_cache(table={self.table_name}, ids={len(id_values)})"
-        self.logger.debug(f"Starting {operation_context}")
-        
-        refreshed = 0
-        not_found = 0
-        errors = 0
-        
-        try:
-            # Clear existing cache entries and null markers
-            cache_keys = {str(id_val) for id_val in id_values}
-            await self.delete_caches(self.table_name, cache_keys)
-            
-            # Clear null markers using pipeline for better performance
-            if self.redis:
-                try:
-                    async with self.redis.pipeline(transaction=False) as pipe:
-                        for id_val in id_values:
-                            null_key = f"{self.table_name}:{id_val}:null"
-                            pipe.delete(null_key)  # Queue delete operation
-                        await pipe.execute()  # Execute all deletes at once
-                except (redis.RedisError, ConnectionError) as e:
-                    # Log but don't fail - cache clear is best effort
-                    self.logger.debug(f"Failed to clear null markers in bulk: {e}")
-            
-            # Fetch fresh data from database
-            sql_results = await self.read_sql(
+        # Delegate to CacheOperate
+        if hasattr(self, 'redis') and self.redis:
+            return await CacheOperate.refresh_cache(
+                self,
                 table_name=self.table_name,
-                filters={"id": list(id_values)}
+                id_values=id_values,
+                fetch_function=self.read_sql
             )
-            
-            if sql_results:
-                # Prepare cache data
-                cache_data_to_set = {}
-                found_ids = set()
-                
-                for sql_row in sql_results:
-                    if sql_row and "id" in sql_row:
-                        cache_data_to_set[str(sql_row["id"])] = sql_row
-                        found_ids.add(sql_row["id"])
-                        refreshed += 1
-                
-                # Store in cache
-                if cache_data_to_set:
-                    await self.store_caches(self.table_name, cache_data_to_set)
-                
-                # Mark missing IDs with null markers using pipeline
-                missing_ids = id_values - found_ids
-                if missing_ids and self.redis:
-                    try:
-                        async with self.redis.pipeline(transaction=False) as pipe:
-                            for missing_id in missing_ids:
-                                null_key = f"{self.table_name}:{missing_id}:null"
-                                pipe.setex(null_key, 300, "1")  # Queue setex operation
-                                not_found += 1
-                            await pipe.execute()  # Execute all at once
-                    except (redis.RedisError, ConnectionError) as e:
-                        self.logger.debug(f"Failed to set null markers in bulk: {e}")
-                        not_found = len(missing_ids)
-                else:
-                    not_found = len(missing_ids)
-            else:
-                # All IDs not found - use pipeline for setting null markers
-                if self.redis:
-                    try:
-                        async with self.redis.pipeline(transaction=False) as pipe:
-                            for id_val in id_values:
-                                null_key = f"{self.table_name}:{id_val}:null"
-                                pipe.setex(null_key, 300, "1")  # Queue setex operation
-                                not_found += 1
-                            await pipe.execute()  # Execute all at once
-                    except (redis.RedisError, ConnectionError) as e:
-                        self.logger.debug(f"Failed to set null markers in bulk: {e}")
-                        not_found = len(id_values)
-                else:
-                    not_found = len(id_values)
-                    
-        except Exception as e:
-            self.logger.error(f"Error in {operation_context}: {str(e)}")
-            errors = len(id_values) - refreshed - not_found
         
-        result = {
-            "refreshed": refreshed,
-            "not_found": not_found,
-            "errors": errors
-        }
-        
-        self.logger.debug(f"Completed {operation_context}: {result}")
-        return result
+        # No cache available
+        return {"refreshed": 0, "not_found": 0, "errors": len(id_values)}
 
     @handle_errors(operation="get_distinct_values")
     async def get_distinct_values(
@@ -1371,50 +1223,32 @@ class GeneralOperate(CacheOperate, SQLOperate, InfluxOperate, Generic[T], ABC):
         Returns:
             List of distinct values from the specified field
         """
-        operation_context = f"get_distinct_values(table={self.table_name}, field={field})"
-        self.logger.debug(f"Starting {operation_context}")
-        
-        # Generate cache key for this query
-        cache_key = None
-        if cache_ttl > 0:
-            import hashlib
-            filter_str = json.dumps(filters, sort_keys=True) if filters else ""
-            cache_key = f"{self.table_name}:distinct:{field}:{hashlib.md5(filter_str.encode()).hexdigest()}"
+        # Use CacheOperate's cached version if cache is available
+        if hasattr(self, 'redis') and self.redis and cache_ttl > 0:
+            # Create a fetch function that wraps SQLOperate.get_distinct_values
+            async def fetch_distinct(table_name, _field, _filters):
+                return await SQLOperate.get_distinct_values(
+                    self,
+                    table_name,
+                    _field,
+                    _filters,
+                    session=session
+                )
             
-            # Try to get from cache
-            try:
-                cached_result = await self.redis.get(cache_key)
-                if cached_result:
-                    result = json.loads(cached_result)
-                    self.logger.debug(f"{operation_context} - Found in cache, returning {len(result)} values")
-                    return result
-            except Exception as cache_err:
-                self.logger.warning(f"Cache read failed in {operation_context}: {cache_err}")
-        
-        # Get from database
-        try:
-            distinct_values = await SQLOperate.get_distinct_values(
+            return await CacheOperate.get_distinct_values_cached(
                 self,
-                self.table_name,
-                field,
-                filters,
-                session=session
+                table_name=self.table_name,
+                field=field,
+                filters=filters,
+                cache_ttl=cache_ttl,
+                fetch_function=fetch_distinct
             )
-            
-            # Cache the result if caching is enabled
-            if cache_key and cache_ttl > 0:
-                try:
-                    await self.redis.setex(
-                        cache_key,
-                        cache_ttl,
-                        json.dumps(distinct_values, cls=EnhancedJSONEncoder)
-                    )
-                except Exception as cache_err:
-                    self.logger.warning(f"Cache write failed in {operation_context}: {cache_err}")
-            
-            self.logger.debug(f"Completed {operation_context}, found {len(distinct_values)} distinct values")
-            return distinct_values
-            
-        except Exception as e:
-            self.logger.error(f"Database query failed in {operation_context}: {str(e)}")
-            raise
+        
+        # Direct database query without caching
+        return await SQLOperate.get_distinct_values(
+            self,
+            self.table_name,
+            field,
+            filters,
+            session=session
+        )

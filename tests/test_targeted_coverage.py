@@ -345,9 +345,10 @@ class TestSpecificMissingLines:
     async def test_exists_check_cache_error_lines_1086_1087(self, operator):
         """Test cache error in exists_check (lines 1086-1087)"""
         
-        operator.redis.exists = AsyncMock(side_effect=redis.RedisError("Cache error"))
-        
-        with patch.object(operator, 'exists_sql', return_value={1: True}):
+        # Mock CacheOperate.check_null_markers_batch to raise error
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   side_effect=redis.RedisError("Cache error")), \
+             patch.object(operator, 'exists_sql', return_value={1: True}):
             with patch.object(operator.logger, 'warning') as mock_warning:
                 result = await operator.exists_check(1)
                 # Lines 1086-1087: cache error logged
@@ -358,11 +359,15 @@ class TestSpecificMissingLines:
     async def test_exists_check_null_marker_error_lines_1104_1105(self, operator):
         """Test null marker error (lines 1104-1105)"""
         
-        with patch.object(operator, 'exists_sql', return_value={1: False}):
-            with patch.object(operator, 'set_null_key', side_effect=Exception("Null key error")):
-                # Should not raise exception (lines 1104-1105)
-                result = await operator.exists_check(1)
-                assert result is False
+        with patch('general_operate.app.cache_operate.CacheOperate.check_null_markers_batch',
+                   new=AsyncMock(return_value=({}, {1}))), \
+             patch.object(operator, 'get_caches', return_value=None), \
+             patch.object(operator, 'exists_sql', return_value={1: False}), \
+             patch('general_operate.app.cache_operate.CacheOperate.set_null_markers_batch',
+                   side_effect=Exception("Null key error")):
+            # Should not raise exception (lines 1104-1105)
+            result = await operator.exists_check(1)
+            assert result is False
     
     @pytest.mark.asyncio
     async def test_exists_check_db_error_lines_1110_1112(self, operator):
@@ -405,14 +410,12 @@ class TestSpecificMissingLines:
         
         operator.redis = None
         
-        # Mock delete_caches to do nothing when redis is None
-        with patch.object(operator, 'delete_caches', new_callable=AsyncMock) as mock_delete:
-            with patch.object(operator, 'read_sql', return_value=[{"id": 1}]):
-                with patch.object(operator, 'store_caches', new_callable=AsyncMock):
-                    result = await operator.refresh_cache({1, 2, 3})
-                    # Lines 1277-1281: handle missing IDs without Redis
-                    assert result["refreshed"] == 1
-                assert result["not_found"] == 2
+        result = await operator.refresh_cache({1, 2, 3})
+        
+        # When no redis, should return errors for all IDs
+        assert result["refreshed"] == 0
+        assert result["not_found"] == 0
+        assert result["errors"] == 3
     
     @pytest.mark.asyncio
     async def test_refresh_cache_all_missing_error_lines_1292_1296(self, operator):

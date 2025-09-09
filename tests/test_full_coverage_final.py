@@ -1356,7 +1356,7 @@ class TestGeneralOperateClass:
     @pytest.mark.asyncio
     async def test_get_cache_data(self, general_operate):
         """Test get cache data utility"""
-        with patch.object(general_operate, 'get_cache', return_value={"data": "value"}):
+        with patch('general_operate.app.cache_operate.CacheOperate.get_cache', return_value={"data": "value"}):
             result = await general_operate.get_cache_data("prefix", "id")
         
         assert result == {"data": "value"}
@@ -1364,7 +1364,7 @@ class TestGeneralOperateClass:
     @pytest.mark.asyncio
     async def test_delete_cache_data(self, general_operate):
         """Test delete cache data utility"""
-        with patch.object(general_operate, 'delete_cache', return_value=True):
+        with patch('general_operate.app.cache_operate.CacheOperate.delete_cache', return_value=True):
             result = await general_operate.delete_cache_data("prefix", "id")
         
         assert result is True
